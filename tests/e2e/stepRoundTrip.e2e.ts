@@ -134,6 +134,54 @@ describe("STEP export round-trip (real OCCT kernel)", () => {
   it("throws when there is nothing exact to export", async () => {
     await expect(exportShapesToStep([shape({ kind: "pyramid", name: "Pyramid" })])).rejects.toThrow(/No box\/cylinder\/sphere/i);
   });
+
+  it("evaluates a live CSG union body to exact B-Rep STEP", async () => {
+    const unionBody = shape({
+      kind: "mesh",
+      name: "UnionBody",
+      width: 20,
+      depth: 10,
+      height: 10,
+      csg: { op: "union", version: 1 },
+      groupedShapes: [
+        shape({ id: "a", kind: "box", name: "A", x: -5, width: 10, depth: 10, height: 10 }),
+        shape({ id: "b", kind: "box", name: "B", x: 5, width: 10, depth: 10, height: 10 }),
+      ],
+    });
+    const { blob, exportedCount, skipped } = await exportShapesToStep([unionBody]);
+    expect(exportedCount).toBe(1);
+    expect(skipped.filter((s) => s.name === "UnionBody")).toEqual([]);
+    // Two 10×10×10 boxes sharing a face → volume 2000
+    expect(near(await reimportVolume(blob), 2000)).toBe(true);
+  });
+
+  it("evaluates a live CSG subtract body (box − cylinder) to exact B-Rep STEP", async () => {
+    const cutBody = shape({
+      kind: "mesh",
+      name: "CutBody",
+      width: 20,
+      depth: 20,
+      height: 10,
+      csg: { op: "subtract", version: 1 },
+      groupedShapes: [
+        shape({ id: "plate", kind: "box", name: "Plate", width: 20, depth: 20, height: 10 }),
+        shape({
+          id: "bore",
+          kind: "cylinder",
+          name: "Bore",
+          hole: true,
+          width: 6,
+          depth: 6,
+          height: 14,
+          elevation: -2,
+        }),
+      ],
+    });
+    const { blob, exportedCount } = await exportShapesToStep([cutBody]);
+    expect(exportedCount).toBe(1);
+    const expected = 20 * 20 * 10 - PI * 3 * 3 * 10;
+    expect(near(await reimportVolume(blob), expected)).toBe(true);
+  });
 });
 
 describe("STEP import → re-export round-trip (real OCCT kernel)", () => {

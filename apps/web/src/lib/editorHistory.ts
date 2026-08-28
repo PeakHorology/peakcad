@@ -1,14 +1,28 @@
 import type { WorkplaneShape } from "@/types/sketchforge";
-import { canonicalizeShape, serializeShapesForSync } from "@/lib/workplaneShapes";
+import { hardwareProfile } from "@/lib/desktopHardware";
+import { canonicalizeShape } from "@/lib/workplaneShapes";
 
-export const MAX_EDITOR_HISTORY_ENTRIES = 100;
-export const MAX_EDITOR_HISTORY_BYTES = 64 * 1024 * 1024;
+const profile = hardwareProfile();
+export const MAX_EDITOR_HISTORY_ENTRIES = profile.historyEntries;
+export const MAX_EDITOR_HISTORY_BYTES = profile.historyBytes;
+
+/** Tessellation / STEP payloads relocated out of per-shape history clones. */
+export type EditorHistoryMeshBlob = {
+  positions: number[];
+  indices?: number[];
+  normals?: number[];
+  brepStep?: string;
+};
+
+export type EditorHistoryMeshVault = Record<string, EditorHistoryMeshBlob>;
 
 export type EditorHistoryEntry = {
   shapes: WorkplaneShape[];
   selectedIds: string[];
   fingerprint: string;
   estimatedBytes: number;
+  /** Large mesh payloads keyed by shape path (see compactHistoryShape). */
+  meshVault?: EditorHistoryMeshVault;
 };
 
 export type EditorHistoryState = {
@@ -16,8 +30,243 @@ export type EditorHistoryState = {
   index: number;
 };
 
+function meshVaultKey(path: string) {
+  return path;
+}
+
+function hashNumberArray(values: ArrayLike<number>, sampleCount = 48) {
+  let hash = values.length + 2166136261;
+  if (values.length === 0) return hash >>> 0;
+  const step = Math.max(1, Math.floor(values.length / sampleCount));
+  for (let index = 0; index < values.length; index += step) {
+    hash = Math.imul(hash ^ (Math.floor(values[index] * 1000) | 0), 16777619);
+  }
+  hash = Math.imul(hash ^ (Math.floor(values[0] * 1000) | 0), 16777619);
+  hash = Math.imul(hash ^ (Math.floor(values[values.length - 1] * 1000) | 0), 16777619);
+  return hash >>> 0;
+}
+
+/** Lightweight shape payload for fingerprints (avoids JSON of full mesh arrays). */
+function shapeFingerprintPayload(shape: WorkplaneShape): unknown {
+  const mesh = shape.importedMesh;
+  return {
+    id: shape.id,
+    name: shape.name,
+    kind: shape.kind,
+    color: shape.color,
+    hole: shape.hole || undefined,
+    x: shape.x,
+    z: shape.z,
+    elevation: shape.elevation ?? 0,
+    size: shape.size,
+    width: shape.width,
+    depth: shape.depth,
+    height: shape.height,
+    rotation: shape.rotation ?? 0,
+    rotationX: shape.rotationX ?? 0,
+    rotationZ: shape.rotationZ ?? 0,
+    mirrorX: shape.mirrorX || undefined,
+    mirrorY: shape.mirrorY || undefined,
+    mirrorZ: shape.mirrorZ || undefined,
+    radius: shape.radius,
+    steps: shape.steps,
+    sides: shape.sides,
+    bevel: shape.bevel,
+    segments: shape.segments,
+    topRadius: shape.topRadius,
+    baseRadius: shape.baseRadius,
+    leftAngle: shape.leftAngle,
+    rightAngle: shape.rightAngle,
+    text: shape.text,
+    font: shape.font,
+    locked: shape.locked || undefined,
+    hidden: shape.hidden || undefined,
+    csg: shape.csg,
+    groupedBaseWidth: shape.groupedBaseWidth,
+    groupedBaseDepth: shape.groupedBaseDepth,
+    groupedBaseHeight: shape.groupedBaseHeight,
+    edgeTreatments: shape.edgeTreatments,
+    cadDisplayEdgesVersion: shape.cadDisplayEdgesVersion,
+    edgeResizeMode: shape.edgeResizeMode,
+    cadBrepLength: shape.cadBrep?.length ?? 0,
+    cadBrepFrame: shape.cadBrepFrame,
+    cadPrimitiveFrame: shape.cadPrimitiveFrame,
+    sketchId: shape.sketchId,
+    sketchFinish: shape.sketchFinish,
+    sketchProfileIds: shape.sketchProfileIds,
+    sketchPlane: shape.sketchPlane,
+    sketchProfile: shape.sketchProfile,
+    sketchDoc: shape.sketchDoc,
+    imagePlate: shape.imagePlate
+      ? {
+          mimeType: shape.imagePlate.mimeType,
+          pixelWidth: shape.imagePlate.pixelWidth,
+          pixelHeight: shape.imagePlate.pixelHeight,
+          dataUrlLen: shape.imagePlate.dataUrl.length,
+        }
+      : undefined,
+    importedMesh: mesh
+      ? {
+          baseWidth: mesh.baseWidth,
+          baseDepth: mesh.baseDepth,
+          baseHeight: mesh.baseHeight,
+          triangleCount: mesh.triangleCount,
+          sourceFormat: mesh.sourceFormat,
+          positionsLen: mesh.positions.length,
+          positionsHash: hashNumberArray(mesh.positions),
+          indicesLen: mesh.indices?.length ?? 0,
+          normalsLen: mesh.normals?.length ?? 0,
+          brepStepLen: mesh.brepStep?.length ?? 0,
+        }
+      : undefined,
+    groupedShapes: shape.groupedShapes?.map(shapeFingerprintPayload),
+    edgeTreatmentHistory: shape.edgeTreatmentHistory?.map((entry) => ({
+      id: entry.id,
+      createdAt: entry.createdAt,
+      feature: entry.feature,
+      before: shapeFingerprintPayload(entry.before),
+    })),
+  };
+}
+
+/**
+ * Strip evaluated CSG mesh caches and relocate import tessellation / brepStep into
+ * `vault` so undo snapshots stay small. Children + csg meta remain the source of truth
+ * for boolean bodies; imports are restored via {@link expandHistoryShapes}.
+ *
+ * IMPORTANT: never use compacted history shapes as the live scene / project
+ * `shapes` payload without expanding the vault first.
+ */
+export function compactHistoryShape(
+  shape: WorkplaneShape,
+  vault: EditorHistoryMeshVault = {},
+  path = shape.id,
+): WorkplaneShape {
+  const groupedShapes = shape.groupedShapes?.map((child, index) =>
+    compactHistoryShape(child, vault, `${path}/${child.id || index}`),
+  );
+  let next: WorkplaneShape = groupedShapes ? { ...shape, groupedShapes } : { ...shape };
+
+  if (next.edgeTreatmentHistory?.length) {
+    next = {
+      ...next,
+      edgeTreatmentHistory: next.edgeTreatmentHistory.map((entry, index) => ({
+        ...entry,
+        before: compactHistoryShape(entry.before, vault, `${path}/edgeBefore/${index}/${entry.before.id}`),
+      })),
+    };
+  }
+
+  const op = next.csg?.op;
+  if (next.csg && next.groupedShapes?.length && op && op !== "assemble" && next.importedMesh) {
+    // CSG mesh caches rebuild from children on undo, so positions need no vault. The baked STEP
+    // does not rebuild — and dropping it here left remeshDirtyHistoryShapes with no priorBrepStep
+    // to carry forward, so undoing an exact boolean silently downgraded it to faceted.
+    const mesh = next.importedMesh;
+    if (mesh.brepStep) {
+      vault[meshVaultKey(path)] = { positions: [], brepStep: mesh.brepStep };
+    }
+    next = {
+      ...next,
+      importedMesh: {
+        positions: [],
+        baseWidth: mesh.baseWidth,
+        baseDepth: mesh.baseDepth,
+        baseHeight: mesh.baseHeight,
+        triangleCount: 0,
+        sourceFormat: mesh.sourceFormat,
+      },
+      csg: { ...next.csg, dirty: true },
+    };
+    return next;
+  }
+
+  if (next.importedMesh && (next.importedMesh.positions.length >= 9 || next.importedMesh.brepStep)) {
+    const mesh = next.importedMesh;
+    vault[meshVaultKey(path)] = {
+      positions: mesh.positions,
+      ...(mesh.indices ? { indices: mesh.indices } : {}),
+      ...(mesh.normals ? { normals: mesh.normals } : {}),
+      ...(mesh.brepStep ? { brepStep: mesh.brepStep } : {}),
+    };
+    next = {
+      ...next,
+      importedMesh: {
+        positions: [],
+        baseWidth: mesh.baseWidth,
+        baseDepth: mesh.baseDepth,
+        baseHeight: mesh.baseHeight,
+        triangleCount: mesh.triangleCount,
+        sourceFormat: mesh.sourceFormat,
+      },
+    };
+  }
+
+  return next;
+}
+
+export function compactHistoryShapes(
+  shapes: WorkplaneShape[],
+  vault: EditorHistoryMeshVault = {},
+): WorkplaneShape[] {
+  return shapes.map((shape) => compactHistoryShape(shape, vault, shape.id));
+}
+
+/** Reattach vaulted mesh payloads onto compacted history shapes. */
+export function expandHistoryShapes(
+  shapes: WorkplaneShape[],
+  vault: EditorHistoryMeshVault | undefined,
+): WorkplaneShape[] {
+  if (!vault || !Object.keys(vault).length) return shapes;
+
+  const expand = (shape: WorkplaneShape, path: string): WorkplaneShape => {
+    const groupedShapes = shape.groupedShapes?.map((child, index) =>
+      expand(child, `${path}/${child.id || index}`),
+    );
+    let next: WorkplaneShape = groupedShapes ? { ...shape, groupedShapes } : { ...shape };
+
+    if (next.edgeTreatmentHistory?.length) {
+      next = {
+        ...next,
+        edgeTreatmentHistory: next.edgeTreatmentHistory.map((entry, index) => ({
+          ...entry,
+          before: expand(entry.before, `${path}/edgeBefore/${index}/${entry.before.id}`),
+        })),
+      };
+    }
+
+    const blob = vault[meshVaultKey(path)];
+    if (blob && next.importedMesh) {
+      next = {
+        ...next,
+        importedMesh: {
+          ...next.importedMesh,
+          positions: blob.positions,
+          ...(blob.indices ? { indices: blob.indices } : {}),
+          ...(blob.normals ? { normals: blob.normals } : {}),
+          ...(blob.brepStep ? { brepStep: blob.brepStep } : {}),
+          triangleCount:
+            next.importedMesh.triangleCount > 0
+              ? next.importedMesh.triangleCount
+              : Math.floor(blob.positions.length / 9),
+        },
+      };
+    }
+    return next;
+  };
+
+  return shapes.map((shape) => expand(shape, shape.id));
+}
+
+export function historyShapeNeedsRemesh(shape: WorkplaneShape): boolean {
+  const op = shape.csg?.op;
+  if (!shape.csg || !shape.groupedShapes?.length || !op || op === "assemble") return false;
+  if (shape.csg.dirty) return true;
+  return !shape.importedMesh || shape.importedMesh.positions.length < 9;
+}
+
 export function serializedSceneSignature(shapes: WorkplaneShape[]) {
-  const serialized = serializeShapesForSync(shapes);
+  const serialized = JSON.stringify(shapes.map(shapeFingerprintPayload));
   let hashA = 2166136261;
   let hashB = 5381;
   for (let index = 0; index < serialized.length; index += 1) {
@@ -35,13 +284,30 @@ export function projectShapesFingerprint(shapes: WorkplaneShape[]) {
   return serializedSceneSignature(shapes).fingerprint;
 }
 
+function estimateHistoryEntryBytes(shapes: WorkplaneShape[], vault: EditorHistoryMeshVault) {
+  let bytes = serializedSceneSignature(shapes).estimatedBytes;
+  for (const blob of Object.values(vault)) {
+    bytes += blob.positions.length * 8;
+    bytes += (blob.indices?.length ?? 0) * 4;
+    bytes += (blob.normals?.length ?? 0) * 8;
+    bytes += blob.brepStep?.length ?? 0;
+  }
+  return bytes;
+}
+
 export function editorHistoryEntry(shapes: WorkplaneShape[], selectedIds: string[]): EditorHistoryEntry {
-  const canonicalShapes = shapes.map(canonicalizeShape);
+  const liveCanonical = shapes.map(canonicalizeShape);
+  // Fingerprint the live scene before stripping meshes so undo dedupe stays accurate.
+  const signature = serializedSceneSignature(liveCanonical);
+  const vault: EditorHistoryMeshVault = {};
+  const canonicalShapes = compactHistoryShapes(liveCanonical, vault);
   const validSelection = selectedIds.filter((id, index) => selectedIds.indexOf(id) === index && canonicalShapes.some((shape) => shape.id === id));
   return {
     shapes: canonicalShapes,
     selectedIds: validSelection,
-    ...serializedSceneSignature(canonicalShapes),
+    fingerprint: signature.fingerprint,
+    estimatedBytes: estimateHistoryEntryBytes(canonicalShapes, vault),
+    ...(Object.keys(vault).length ? { meshVault: vault } : {}),
   };
 }
 
@@ -82,12 +348,29 @@ export function hydrateEditorHistoryState(
   }
 
   try {
-    const normalized = storedEntries.map((entry) =>
-      editorHistoryEntry(
+    const normalized = storedEntries.map((entry) => {
+      // Prefer already-compacted entries (with vault) — avoid re-walking every mesh.
+      if (
+        entry
+        && typeof entry.fingerprint === "string"
+        && Array.isArray(entry.shapes)
+        && typeof entry.estimatedBytes === "number"
+      ) {
+        return {
+          shapes: entry.shapes,
+          selectedIds: Array.isArray(entry.selectedIds)
+            ? entry.selectedIds.filter((id): id is string => typeof id === "string")
+            : [],
+          fingerprint: entry.fingerprint,
+          estimatedBytes: entry.estimatedBytes,
+          ...(entry.meshVault ? { meshVault: entry.meshVault } : {}),
+        } satisfies EditorHistoryEntry;
+      }
+      return editorHistoryEntry(
         Array.isArray(entry?.shapes) ? entry.shapes : [],
         Array.isArray(entry?.selectedIds) ? entry.selectedIds.filter((id): id is string => typeof id === "string") : [],
-      ),
-    );
+      );
+    });
     const index = Number.isInteger(requestedIndex)
       ? Math.min(Math.max(0, requestedIndex as number), normalized.length - 1)
       : normalized.length - 1;

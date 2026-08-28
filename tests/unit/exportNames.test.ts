@@ -6,6 +6,8 @@ describe("project export filenames", () => {
     expect(projectExportFileName("Gearbox Prototype", "stl")).toBe("Gearbox Prototype.stl");
     expect(projectExportFileName("Gearbox Prototype", "obj")).toBe("Gearbox Prototype.obj");
     expect(projectExportFileName("Gearbox Prototype", "step")).toBe("Gearbox Prototype.step");
+    expect(projectExportFileName("Gearbox Prototype", "3mf")).toBe("Gearbox Prototype.3mf");
+    expect(projectExportFileName("Gearbox Prototype", "pdf")).toBe("Gearbox Prototype.pdf");
   });
 
   it("removes filesystem-reserved characters without discarding the project name", () => {
@@ -13,6 +15,6 @@ describe("project export filenames", () => {
   });
 
   it("falls back to a useful name when the project name cannot be used", () => {
-    expect(projectExportFileName("...", "obj")).toBe("SketchForge design.obj");
+    expect(projectExportFileName("...", "obj")).toBe("PeakCAD design.obj");
   });
 });

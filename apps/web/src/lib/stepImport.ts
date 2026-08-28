@@ -1,6 +1,7 @@
 import type { WorkplaneShape } from "@/types/sketchforge";
-import { importedShapeFromTriangleSoup } from "@/lib/stlImport";
+import { importTriangleSoup } from "@/lib/stlImport";
 import { loadBrepWithOcct } from "@/lib/brepKernel";
+import { quaternionToAxisAngleDegrees } from "@/lib/meshSeatOrientation";
 
 const STEP_EXTENSIONS = new Set(["step", "stp"]);
 
@@ -37,27 +38,30 @@ export async function importedShapeFromStep(fileName: string, buffer: ArrayBuffe
     }
   }
 
-  // importedShapeFromTriangleSoup recenters the mesh to x/z-centered, bottom at
-  // y=0. Recenter the stored B-Rep by the same offset so the exact geometry and
-  // the displayed mesh share one local frame, and the editor's transforms apply
-  // identically to both.
-  let minX = Infinity;
-  let minY = Infinity;
-  let minZ = Infinity;
-  let maxX = -Infinity;
-  let maxZ = -Infinity;
-  for (let i = 0; i < positions.length; i += 3) {
-    minX = Math.min(minX, positions[i]);
-    maxX = Math.max(maxX, positions[i]);
-    minY = Math.min(minY, positions[i + 1]);
-    minZ = Math.min(minZ, positions[i + 2]);
-    maxZ = Math.max(maxZ, positions[i + 2]);
+  // Seat on the largest flat face, then recenter. Apply the same rigid ops to the
+  // stored B-Rep so display mesh and exact geometry share one local frame.
+  const { shape, seatRotation, seatTranslation } = importTriangleSoup(
+    fileName,
+    positions,
+    hasNormals ? normals : undefined,
+    "step",
+  );
+
+  // Apply seat as rigid kernel ops only when needed — avoid redundant rotate/translate
+  // before the single exportSTEP (display mesh is already seated via importTriangleSoup).
+  let normalized = flipped;
+  const { axis, angle } = quaternionToAxisAngleDegrees(seatRotation);
+  const hasRotation = Math.abs(angle) > 1e-6;
+  const hasTranslation = Math.hypot(seatTranslation.x, seatTranslation.y, seatTranslation.z) > 1e-6;
+  if (hasRotation) {
+    normalized = brep.rotate(normalized, angle, { axis });
   }
-  const normalized = brep.translate(flipped, [-(minX + maxX) / 2, -minY, -(minZ + maxZ) / 2]);
+  if (hasTranslation) {
+    normalized = brep.translate(normalized, [seatTranslation.x, seatTranslation.y, seatTranslation.z]);
+  }
+
   const exported = brep.exportSTEP(normalized);
   const stepText = exported.ok ? await exported.value.text() : undefined;
-
-  const shape = importedShapeFromTriangleSoup(fileName, positions, hasNormals ? normals : undefined, "step");
   if (shape.importedMesh && stepText) {
     shape.importedMesh.brepStep = stepText;
   }

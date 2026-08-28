@@ -2,7 +2,33 @@ import type { PointerEvent as ReactPointerEvent } from "react";
 
 export type TransformHandleKind = "scale" | "height" | "lift" | "rotate";
 export type RotationAxis = "x" | "y" | "z";
-export type RotationWheelView = { x: number; y: number; radius: number };
+
+/** Local SVG units for the rotation protractor (maps to screen via planeRadius). */
+export const ROTATION_RING_INNER = 68;
+export const ROTATION_RING_OUTER = 94;
+export const ROTATION_RING_POINTER = 92;
+export const ROTATION_RING_LOCAL_EXTENT = 100;
+export const ROTATION_SNAP_STEP = 22.5;
+
+export type RotationWheelView = {
+  x: number;
+  y: number;
+  /** Screen-space radius of the outer ring edge. */
+  radius: number;
+  /** Screen-space radius of the inner snap ring. */
+  innerRadius: number;
+  /** Screen-space radius of the outer free-rotation ring. */
+  outerRadius: number;
+};
+
+export function rotationWheelRadiiFromPlaneRadius(planeRadius: number): Pick<RotationWheelView, "radius" | "innerRadius" | "outerRadius"> {
+  const outerRadius = planeRadius * (ROTATION_RING_OUTER / ROTATION_RING_LOCAL_EXTENT);
+  return {
+    radius: outerRadius,
+    innerRadius: planeRadius * (ROTATION_RING_INNER / ROTATION_RING_LOCAL_EXTENT),
+    outerRadius,
+  };
+}
 
 export type RotationPlaneView = {
   x: number;
@@ -46,7 +72,7 @@ export type TransformOverlayState = {
   height: number;
   guides: Array<{ x1: number; y1: number; x2: number; y2: number }>;
   handles: Array<{ key: string; className: string; kind: TransformHandleKind; x: number; y: number; title: string }>;
-  rotateHandles: Array<{ key: string; className: string; x: number; y: number; angle: number }>;
+  rotateHandles: Array<{ key: string; className: string; x: number; y: number; angle: number; title?: string }>;
   dimensions: Record<string, DimensionMark[]>;
   rotationWheel: RotationWheelView | null;
   rotationWheels: Record<RotationAxis, RotationWheelView>;
@@ -58,7 +84,13 @@ export type RotationReadout = {
   x: number;
   y: number;
   text: string;
+  /** Signed rotation delta in degrees (for the readout label). */
   angle?: number;
+  /** Protractor degrees (0 = up, clockwise) for the live mouse pointer. */
+  pointerAngle?: number;
+  /** Protractor degrees where the drag started (zero / grab mark). */
+  startPointerAngle?: number;
+  snapMode?: "stepped" | "free";
 } | null;
 
 export type EditingDimension = {
@@ -75,6 +107,8 @@ export type EditingRotation = {
   x: number;
   y: number;
   value: string;
+  /** Value when the box opened; used to detect typed edits on blur. */
+  initialValue: string;
 } | null;
 
 export type TransformOverlayProps = {
@@ -95,6 +129,7 @@ export type TransformOverlayProps = {
   onPinMeasure: (key: string | null) => void;
   onBeginDimensionEdit: (mark: DimensionMark) => void;
   onBeginLiftEdit: (handleKey: string, x: number, y: number) => void;
+  onDropSelectionToWorkplane?: () => void;
   onEditingDimensionChange: (value: string) => void;
   onCommitDimensionEdit: () => void;
   onCancelDimensionEdit: () => void;

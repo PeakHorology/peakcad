@@ -1,4 +1,4 @@
-import type { CSSProperties, SVGProps } from "react";
+import type { CSSProperties, ReactNode, SVGProps } from "react";
 
 type IconProps = SVGProps<SVGSVGElement>;
 type SpriteRect = {
@@ -82,6 +82,17 @@ export function ToolbarDuplicateIcon() {
   return <ToolbarCommandImage file="toolbar-duplicate.png" className="toolbar-user-art-icon" />;
 }
 
+export function ToolbarDuplicateRepeatIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 48 48" aria-hidden="true" {...props}>
+      <rect x="8" y="18" width="14" height="14" rx="2" fill="none" stroke="currentColor" strokeWidth="2.5" />
+      <rect x="18" y="10" width="14" height="14" rx="2" fill="none" stroke="currentColor" strokeWidth="2.5" />
+      <path d="M30 30h8v8" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M30 38l10-10" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function ToolbarTrashIcon() {
   return <ToolbarCommandImage file="toolbar-delete.png" className="toolbar-user-art-icon" />;
 }
@@ -94,12 +105,65 @@ export function ToolbarRedoIcon() {
   return <ToolbarCommandImage file="toolbar-redo.png" className="toolbar-user-art-icon" />;
 }
 
-export function ToolbarImportIcon() {
-  return <ToolbarCommandImage file="toolbar-import.png" className="toolbar-user-art-icon" />;
+export function ToolbarImportIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 48 48" aria-hidden="true" {...props}>
+      <path
+        className="icon-fill"
+        d="M16 6h12l10 10v24a3 3 0 0 1-3 3H16a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3z"
+      />
+      <path
+        className="icon-ink"
+        d="M16 6h12l10 10v24a3 3 0 0 1-3 3H16a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3z"
+        strokeWidth="2.5"
+        strokeLinejoin="round"
+      />
+      <path className="icon-ink" d="M28 6v10h10" strokeWidth="2.5" strokeLinejoin="round" />
+      <path className="icon-ink" d="M24 34V20" strokeWidth="2.8" strokeLinecap="round" />
+      <path className="icon-ink" d="M18 28l6 6 6-6" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
 }
 
-export function ToolbarVectorExportIcon() {
-  return <ToolbarCommandImage file="toolbar-export.png" className="toolbar-user-art-icon" />;
+export function ToolbarVectorExportIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 48 48" aria-hidden="true" {...props}>
+      <path
+        className="icon-fill"
+        d="M16 6h12l10 10v24a3 3 0 0 1-3 3H16a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3z"
+      />
+      <path
+        className="icon-ink"
+        d="M16 6h12l10 10v24a3 3 0 0 1-3 3H16a3 3 0 0 1-3-3V9a3 3 0 0 1 3-3z"
+        strokeWidth="2.5"
+        strokeLinejoin="round"
+      />
+      <path className="icon-ink" d="M28 6v10h10" strokeWidth="2.5" strokeLinejoin="round" />
+      <path className="icon-ink" d="M24 18v14" strokeWidth="2.8" strokeLinecap="round" />
+      <path className="icon-ink" d="M18 24l6-6 6 6" strokeWidth="2.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+export function ToolbarBlueprintIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 48 48" aria-hidden="true" {...props}>
+      {/* Sheet body */}
+      <rect className="icon-fill" x="8" y="8" width="32" height="32" rx="3" />
+      <rect className="icon-ink" x="8" y="8" width="32" height="32" rx="3" strokeWidth="2.5" />
+      {/* View frames: light panels + dark outlines for contrast against sheet grey */}
+      <rect className="icon-panel" x="12" y="12" width="14" height="10" rx="1.2" />
+      <rect className="icon-ink" x="12" y="12" width="14" height="10" rx="1.2" strokeWidth="2" />
+      <rect className="icon-panel" x="12" y="26" width="14" height="10" rx="1.2" />
+      <rect className="icon-ink" x="12" y="26" width="14" height="10" rx="1.2" strokeWidth="2" />
+      <rect className="icon-panel" x="30" y="26" width="6" height="10" rx="1.2" />
+      <rect className="icon-ink" x="30" y="26" width="6" height="10" rx="1.2" strokeWidth="2" />
+      {/* Title block */}
+      <rect className="icon-panel" x="28" y="12" width="8" height="10" rx="1.2" />
+      <rect className="icon-ink" x="28" y="12" width="8" height="10" rx="1.2" strokeWidth="2" />
+      <path className="icon-ink" d="M30 15.5h4M30 19h4" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
 }
 
 export function ToolbarSettingsIcon() {
@@ -156,6 +220,25 @@ export function ToolbarFilletIcon() {
   return <ToolbarCommandImage file="toolbar-fillet.png" className="toolbar-user-art-icon" />;
 }
 
+export function ToolbarCircularPatternIcon() {
+  return <ToolbarCommandImage file="toolbar-circular-pattern.png" className="toolbar-user-art-icon" />;
+}
+
+export function ToolbarThreadIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 48 48" aria-hidden="true" {...props}>
+      <path d="M14 8v32M34 8v32" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
+      <path
+        d="M14 12c6 2 14 2 20 0M14 18c6 2 14 2 20 0M14 24c6 2 14 2 20 0M14 30c6 2 14 2 20 0M14 36c6 2 14 2 20 0"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
 export function ToolbarPreserveEdgeIcon(props: IconProps) {
   return (
     <svg viewBox="0 0 48 48" aria-hidden="true" {...props}>
@@ -171,8 +254,8 @@ export function ToolbarSnapGridIcon() {
   return <ToolbarCommandImage file="toolbar-snap-grid.png" className="toolbar-user-art-icon" />;
 }
 
-export function ToolbarExportIcon() {
-  return <ToolbarCommandImage file="toolbar-export.png" className="toolbar-user-art-icon" />;
+export function ToolbarExportIcon(props: IconProps) {
+  return <ToolbarVectorExportIcon {...props} />;
 }
 
 export function ToolbarWorkplaneIcon() {
@@ -181,4 +264,107 @@ export function ToolbarWorkplaneIcon() {
 
 export function ToolbarDropToWorkplaneIcon() {
   return <ToolbarCommandImage file="toolbar-drop-workplane.png" className="toolbar-user-art-icon" />;
+}
+
+/** Sketch constraint / modify icons — PeakCAD stroke language (not letter glyphs). */
+function SketchGlyphIcon({ children, ...props }: IconProps & { children: ReactNode }) {
+  return (
+    <svg viewBox="0 0 48 48" fill="none" aria-hidden="true" {...props}>
+      {children}
+    </svg>
+  );
+}
+
+export function SketchDimensionIcon(props: IconProps) {
+  return (
+    <SketchGlyphIcon {...props}>
+      <path d="M10 34V14M38 34V14" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M10 24h28" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" />
+      <path d="M14 20l-4 4 4 4M34 20l4 4-4 4" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+    </SketchGlyphIcon>
+  );
+}
+
+export function SketchConstraintHorizontalIcon(props: IconProps) {
+  return (
+    <SketchGlyphIcon {...props}>
+      <path d="M8 24h32" stroke="currentColor" strokeWidth="2.7" strokeLinecap="round" />
+      <path d="M14 18v12M34 18v12" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+    </SketchGlyphIcon>
+  );
+}
+
+export function SketchConstraintVerticalIcon(props: IconProps) {
+  return (
+    <SketchGlyphIcon {...props}>
+      <path d="M24 8v32" stroke="currentColor" strokeWidth="2.7" strokeLinecap="round" />
+      <path d="M18 14h12M18 34h12" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" />
+    </SketchGlyphIcon>
+  );
+}
+
+export function SketchConstraintEqualIcon(props: IconProps) {
+  return (
+    <SketchGlyphIcon {...props}>
+      <path d="M12 18h24M12 30h24" stroke="currentColor" strokeWidth="2.8" strokeLinecap="round" />
+    </SketchGlyphIcon>
+  );
+}
+
+export function SketchConstraintParallelIcon(props: IconProps) {
+  return (
+    <SketchGlyphIcon {...props}>
+      <path d="M14 38L26 10M22 38L34 10" stroke="currentColor" strokeWidth="2.7" strokeLinecap="round" />
+    </SketchGlyphIcon>
+  );
+}
+
+export function SketchConstraintPerpendicularIcon(props: IconProps) {
+  return (
+    <SketchGlyphIcon {...props}>
+      <path d="M12 36V14h22" stroke="currentColor" strokeWidth="2.7" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M12 22h8v8" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" />
+    </SketchGlyphIcon>
+  );
+}
+
+export function SketchConstraintTangentIcon(props: IconProps) {
+  return (
+    <SketchGlyphIcon {...props}>
+      <circle cx="20" cy="26" r="11" stroke="currentColor" strokeWidth="2.5" />
+      <path d="M8 14h32" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
+      <circle cx="20" cy="14" r="2.2" fill="currentColor" />
+    </SketchGlyphIcon>
+  );
+}
+
+export function SketchConstraintSymmetryIcon(props: IconProps) {
+  return (
+    <SketchGlyphIcon {...props}>
+      <path d="M24 8v32" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeDasharray="3.5 3" />
+      <path d="M10 18l10 6-10 6V18ZM38 18l-10 6 10 6V18Z" fill="currentColor" opacity="0.92" />
+    </SketchGlyphIcon>
+  );
+}
+
+export function SketchTrimIcon(props: IconProps) {
+  return (
+    <SketchGlyphIcon {...props}>
+      <path d="M10 14l28 20" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" />
+      <path d="M38 14L24 24" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeDasharray="4 3.5" />
+      <circle cx="24" cy="24" r="3" fill="currentColor" />
+      <path d="M18 32c4 4 8 4 12 0" stroke="currentColor" strokeWidth="2.3" strokeLinecap="round" />
+    </SketchGlyphIcon>
+  );
+}
+
+export function SketchRectPatternIcon(props: IconProps) {
+  return (
+    <SketchGlyphIcon {...props}>
+      <rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="2.4" />
+      <rect x="28" y="9" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="2.4" opacity="0.55" />
+      <rect x="9" y="28" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="2.4" opacity="0.55" />
+      <rect x="28" y="28" width="11" height="11" rx="2" stroke="currentColor" strokeWidth="2.4" opacity="0.55" />
+    </SketchGlyphIcon>
+  );
 }

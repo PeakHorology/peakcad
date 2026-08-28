@@ -44,6 +44,23 @@ function allFinitePositive(values: number[]) {
   return values.every((value) => Number.isFinite(value) && value > 0);
 }
 
+function analyticPrimitiveTransform(shape: WorkplaneShape, height: number, yawDegrees: number) {
+  const centerY = height / 2;
+  const matrix = new THREE.Matrix4()
+    .makeTranslation(shape.x, (shape.elevation ?? 0) + centerY, shape.z)
+    .multiply(new THREE.Matrix4().makeRotationFromEuler(
+      new THREE.Euler(
+        THREE.MathUtils.degToRad(shape.rotationX ?? 0),
+        THREE.MathUtils.degToRad(yawDegrees),
+        THREE.MathUtils.degToRad(shape.rotationZ ?? 0),
+        "XYZ",
+      ),
+    ))
+    .multiply(new THREE.Matrix4().makeScale(mirrorSign(shape.mirrorX), mirrorSign(shape.mirrorY), mirrorSign(shape.mirrorZ)))
+    .multiply(new THREE.Matrix4().makeTranslation(0, -centerY, 0));
+  return cadTransformFromMatrix(matrix);
+}
+
 export function cadModifierPrimitiveForAnalyticBox(shape: WorkplaneShape): CadModifierPrimitivePart | null {
   if (shape.kind !== "box" || shape.importedMesh || shape.groupedShapes?.length) {
     return null;
@@ -56,21 +73,7 @@ export function cadModifierPrimitiveForAnalyticBox(shape: WorkplaneShape): CadMo
     return null;
   }
 
-  const centerY = height / 2;
-  const matrix = new THREE.Matrix4()
-    .makeTranslation(shape.x, (shape.elevation ?? 0) + centerY, shape.z)
-    .multiply(new THREE.Matrix4().makeRotationFromEuler(
-      new THREE.Euler(
-        THREE.MathUtils.degToRad(shape.rotationX ?? 0),
-        THREE.MathUtils.degToRad(shape.rotation ?? 0),
-        THREE.MathUtils.degToRad(shape.rotationZ ?? 0),
-        "XYZ",
-      ),
-    ))
-    .multiply(new THREE.Matrix4().makeScale(mirrorSign(shape.mirrorX), mirrorSign(shape.mirrorY), mirrorSign(shape.mirrorZ)))
-    .multiply(new THREE.Matrix4().makeTranslation(0, -centerY, 0));
-
-  const transform = cadTransformFromMatrix(matrix);
+  const transform = analyticPrimitiveTransform(shape, height, shape.rotation ?? 0);
   return {
     kind: "box",
     width,
@@ -80,10 +83,37 @@ export function cadModifierPrimitiveForAnalyticBox(shape: WorkplaneShape): CadMo
   };
 }
 
+/** Circular native cylinders as exact OCCT solids so Thread can find cylindrical faces. */
+export function cadModifierPrimitiveForAnalyticCylinder(shape: WorkplaneShape): CadModifierPrimitivePart | null {
+  if (shape.kind !== "cylinder" || shape.importedMesh || shape.groupedShapes?.length || shape.cadBrep) {
+    return null;
+  }
+
+  const width = shapeWidth(shape);
+  const depth = shapeDepth(shape);
+  const height = shape.height;
+  if (!allFinitePositive([width, depth, height])) {
+    return null;
+  }
+  if (Math.abs(width - depth) >= 1e-4) {
+    return null;
+  }
+
+  const radius = width / 2;
+  // Circular cylinders are invariant about yaw; keep pitch/roll/mirrors.
+  const transform = analyticPrimitiveTransform(shape, height, 0);
+  return {
+    kind: "cylinder",
+    radius,
+    height,
+    transform: isIdentityCadTransform(transform) ? undefined : transform,
+  };
+}
+
 export function cadModifierPrimitiveForBakedShape(shape: WorkplaneShape): CadModifierPrimitivePart | null {
   const primitive = shape.cadPrimitiveFrame;
   const frame = primitive?.frame;
-  if (!primitive || primitive.kind !== "box" || !frame) {
+  if (!primitive || !frame) {
     return null;
   }
 
@@ -105,6 +135,11 @@ export function cadModifierPrimitiveForBakedShape(shape: WorkplaneShape): CadMod
   const scaleX = shapeWidth(shape) / frame.width;
   const scaleY = shape.height / frame.height;
   const scaleZ = shapeDepth(shape) / frame.depth;
+  // A cylinder scaled unevenly across its axes is an ellipse, which no exact cylinder can stand in
+  // for. Reporting it as one would put the wrong geometry in the STEP file.
+  if (primitive.kind === "cylinder" && Math.abs(scaleX - scaleZ) >= 1e-4) {
+    return null;
+  }
   const mirrorX = mirrorSign(shape.mirrorX);
   const mirrorY = mirrorSign(shape.mirrorY);
   const mirrorZ = mirrorSign(shape.mirrorZ);
@@ -124,12 +159,21 @@ export function cadModifierPrimitiveForBakedShape(shape: WorkplaneShape): CadMod
     .multiply(cadTransformToMatrix(frame.sourceTransform));
 
   const transform = cadTransformFromMatrix(matrix);
+  const bakedTransform = isIdentityCadTransform(transform) ? undefined : transform;
+  if (primitive.kind === "cylinder") {
+    return {
+      kind: "cylinder",
+      radius: primitive.width / 2,
+      height: primitive.height,
+      transform: bakedTransform,
+    };
+  }
   return {
-    kind: primitive.kind,
+    kind: "box",
     width: primitive.width,
     depth: primitive.depth,
     height: primitive.height,
-    transform: isIdentityCadTransform(transform) ? undefined : transform,
+    transform: bakedTransform,
   };
 }
 
@@ -202,15 +246,21 @@ function bakeCadDisplayEdgesForShape(shape: WorkplaneShape, frame: BakedCadMetad
 }
 
 function bakeCadPrimitiveFrameForShapeTransform(shape: WorkplaneShape, frame: BakedCadMetadataFrame) {
-  const primitive = cadModifierPrimitiveForBakedShape(shape) ?? cadModifierPrimitiveForAnalyticBox(shape);
+  // Cylinders were left out here, so baking a transform silently cost a cylinder its exact identity
+  // and it exported faceted while an equivalent box stayed exact.
+  const primitive = cadModifierPrimitiveForBakedShape(shape)
+    ?? cadModifierPrimitiveForAnalyticBox(shape)
+    ?? cadModifierPrimitiveForAnalyticCylinder(shape);
   if (!primitive) {
     return undefined;
   }
 
+  // Diameter is stored in width/depth so the frame stays one shape for both kinds.
+  const diameter = primitive.kind === "cylinder" ? primitive.radius * 2 : 0;
   return {
     kind: primitive.kind,
-    width: primitive.width,
-    depth: primitive.depth,
+    width: primitive.kind === "cylinder" ? diameter : primitive.width,
+    depth: primitive.kind === "cylinder" ? diameter : primitive.depth,
     height: primitive.height,
     frame: {
       x: frame.centerX,

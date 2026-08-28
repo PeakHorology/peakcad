@@ -1,3 +1,5 @@
+import { readAppliedUiTheme, type UiTheme } from "@/lib/uiTheme";
+
 const WORKPLANE_BOUNDARY_EPSILON = 0.0001;
 
 export const WORKPLANE_LINE_ELEVATION = 0;
@@ -14,7 +16,15 @@ export type WorkplaneGridPalette = {
   border: { color: string; opacity: number };
 };
 
-export function workplaneGridPalette(): WorkplaneGridPalette {
+export function workplaneGridPalette(theme: UiTheme = readAppliedUiTheme()): WorkplaneGridPalette {
+  if (theme === "dark") {
+    return {
+      minor: { color: "#3d7a8a", opacity: 0.5 },
+      major: { color: "#5eb8e8", opacity: 0.62 },
+      axis: { color: "#7ec8e8", opacity: 0.85 },
+      border: { color: "#6bb8d8", opacity: 0.88 },
+    };
+  }
   return {
     minor: { color: "#91dff0", opacity: 0.55 },
     major: { color: "#4bbddf", opacity: 0.7 },

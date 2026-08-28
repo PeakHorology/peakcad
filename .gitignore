@@ -10,6 +10,8 @@ node_modules/
 out/
 build/
 dist/
+dist-build/
+dist-release*/
 
 # Environment files
 .env

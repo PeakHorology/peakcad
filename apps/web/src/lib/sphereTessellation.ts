@@ -1,7 +1,9 @@
-export const DEFAULT_SPHERE_STEPS = 24;
+import { defaultStepsForKind, getActiveDisplayQuality } from "@/lib/displayTessellation";
 
-export function sphereTessellation(steps = DEFAULT_SPHERE_STEPS) {
-  const normalizedSteps = Math.max(6, Math.round(steps));
+export const DEFAULT_SPHERE_STEPS = defaultStepsForKind("sphere", "smooth") ?? 64;
+
+export function sphereTessellation(steps?: number) {
+  const normalizedSteps = Math.max(6, Math.round(steps ?? defaultStepsForKind("sphere", getActiveDisplayQuality()) ?? DEFAULT_SPHERE_STEPS));
 
   return {
     widthSegments: Math.max(8, normalizedSteps * 2),

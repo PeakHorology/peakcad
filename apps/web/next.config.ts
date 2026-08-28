@@ -22,12 +22,27 @@ const nextConfig: NextConfig = {
   // brepjs (loaded lazily by the STEP exporter) ships an auto-init helper that
   // tries optional kernel backends via guarded `import().catch()`. We only install
   // and use occt-wasm, so silence the resolution warnings for the backends we omit.
-  webpack: (config) => {
+  webpack: (config, { isServer, webpack }) => {
     config.resolve.alias = {
       ...config.resolve.alias,
       "brepkit-wasm": false,
       "brepjs-opencascade": false,
     };
+    // Next.js worker chunks finish with `_N_E = __webpack_exports__`, but Workers
+    // never get the main-thread `_N_E` declaration. That throws ReferenceError on
+    // startup and surfaces as "The CAD worker could not start."
+    if (!isServer) {
+      config.plugins.push(
+        new webpack.BannerPlugin({
+          raw: true,
+          entryOnly: false,
+          test: /workers_.*_worker_|[\\/]workers[\\/].*\.worker\./,
+          banner:
+            "var _N_E = (typeof self !== 'undefined' && self._N_E) ? self._N_E : {};" +
+            "if (typeof self !== 'undefined') self._N_E = _N_E;",
+        }),
+      );
+    }
     return config;
   },
   ...(isStaticExport
@@ -35,7 +50,20 @@ const nextConfig: NextConfig = {
         output: "export" as const,
         trailingSlash: true,
       }
-    : {}),
+    : {
+        // Dev/server only — static export cannot set headers; Electron serves COOP/COEP itself.
+        async headers() {
+          return [
+            {
+              source: "/:path*",
+              headers: [
+                { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
+                { key: "Cross-Origin-Embedder-Policy", value: "credentialless" },
+              ],
+            },
+          ];
+        },
+      }),
 };
 
 export default nextConfig;

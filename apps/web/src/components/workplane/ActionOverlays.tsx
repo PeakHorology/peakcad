@@ -1,4 +1,7 @@
+"use client";
+
 import type { CSSProperties } from "react";
+import { PeakTipButton } from "@/components/workplane/ToolNameTooltip";
 import type { AlignAxis, AlignHandleStatus, AlignTarget } from "@/types/sketchforge";
 
 export type AlignOverlayState = {
@@ -30,19 +33,18 @@ export function AlignOverlay({
         ))}
       </svg>
       {overlay.handles.map((handle) => (
-        <button
+        <PeakTipButton
           key={handle.key}
+          label={handle.title}
           className={`align-dot axis-${handle.axis} target-${handle.target} ${handle.disabled ? "disabled" : ""} ${handle.aligned ? "aligned" : ""}`}
           style={{ left: handle.x, top: handle.y }}
-          aria-label={handle.title}
-          title={handle.title}
           disabled={handle.disabled}
-          onMouseEnter={() => {
+          onPointerEnter={() => {
             if (!handle.disabled) {
               onPreview(handle.axis, handle.target);
             }
           }}
-          onMouseLeave={onPreviewClear}
+          onPointerLeave={onPreviewClear}
           onFocus={() => {
             if (!handle.disabled) {
               onPreview(handle.axis, handle.target);
@@ -79,14 +81,13 @@ export function MirrorOverlay({
         ))}
       </svg>
       {overlay.handles.map((handle) => (
-        <button
+        <PeakTipButton
           key={handle.key}
+          label={handle.title}
           className={`mirror-handle axis-${handle.axis}`}
           style={{ left: handle.x, top: handle.y, "--mirror-angle": `${handle.angle}deg` } as CSSProperties}
-          aria-label={handle.title}
-          title={handle.title}
-          onMouseEnter={() => onPreview(handle.axis)}
-          onMouseLeave={onPreviewClear}
+          onPointerEnter={() => onPreview(handle.axis)}
+          onPointerLeave={onPreviewClear}
           onFocus={() => onPreview(handle.axis)}
           onBlur={onPreviewClear}
           onClick={(event) => {
@@ -100,8 +101,32 @@ export function MirrorOverlay({
             <path d="m19 4-8 8 8 8" />
             <path d="m45 4 8 8-8 8" />
           </svg>
-        </button>
+        </PeakTipButton>
       ))}
+    </div>
+  );
+}
+
+export type CircularPatternOverlayState = {
+  cx: number;
+  cy: number;
+  radiusPx: number;
+};
+
+export function CircularPatternOverlay({ overlay }: { overlay: CircularPatternOverlayState }) {
+  const size = Math.max(8, overlay.radiusPx * 2);
+  return (
+    <div className="circular-pattern-overlay" aria-hidden="true">
+      <div
+        className="circular-pattern-ring"
+        style={{
+          left: overlay.cx,
+          top: overlay.cy,
+          width: size,
+          height: size,
+        }}
+      />
+      <div className="circular-pattern-center" style={{ left: overlay.cx, top: overlay.cy }} />
     </div>
   );
 }

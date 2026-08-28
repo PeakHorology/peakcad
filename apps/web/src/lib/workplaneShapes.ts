@@ -1,5 +1,9 @@
 import type { WorkplaneShape } from "@/types/sketchforge";
 
+import { hardwareProfile } from "@/lib/desktopHardware";
+
+export const MAX_SHAPE_SIDES = hardwareProfile().maxShapeSides;
+
 export function normalizeDegrees(value: number) {
   return ((value % 360) + 360) % 360;
 }
@@ -21,12 +25,97 @@ export function cleanNearZero(value: number, epsilon = 0.005) {
   return Math.abs(value) < epsilon ? 0 : value;
 }
 
-export function shapeWidth(shape: WorkplaneShape) {
+export function shapeWidth(shape: Pick<WorkplaneShape, "width" | "size">) {
   return shape.width ?? shape.size;
 }
 
-export function shapeDepth(shape: WorkplaneShape) {
+export function shapeDepth(shape: Pick<WorkplaneShape, "depth" | "size">) {
   return shape.depth ?? shape.size;
+}
+
+/** Cone base radius in model units (falls back to half the footprint width). */
+export function coneBaseRadius(shape: Pick<WorkplaneShape, "baseRadius" | "width" | "size">) {
+  return shape.baseRadius ?? shapeWidth(shape) / 2;
+}
+
+/** Cone top radius in model units (0 = pointy tip). */
+export function coneTopRadius(shape: Pick<WorkplaneShape, "topRadius">) {
+  return shape.topRadius ?? 0;
+}
+
+/** Larger of the two cone rings — drives the minimum overall footprint. */
+export function coneMaxRadius(shape: Pick<WorkplaneShape, "baseRadius" | "topRadius" | "width" | "size">) {
+  return Math.max(coneBaseRadius(shape), coneTopRadius(shape));
+}
+
+/**
+ * Unit-frustum top scale for mesh/CSG: larger ring maps to 1, then width/depth
+ * scale the overall footprint (same pattern as cylinders).
+ */
+export function coneUnitTopScale(shape: Pick<WorkplaneShape, "baseRadius" | "topRadius" | "width" | "size">) {
+  const maxR = Math.max(0.001, coneMaxRadius(shape));
+  return coneTopRadius(shape) / maxR;
+}
+
+export function coneUnitBaseScale(shape: Pick<WorkplaneShape, "baseRadius" | "topRadius" | "width" | "size">) {
+  const maxR = Math.max(0.001, coneMaxRadius(shape));
+  return coneBaseRadius(shape) / maxR;
+}
+
+/** @deprecated Width/depth are the overall footprint; prefer shapeWidth/shapeDepth halves. */
+export function coneLocalHalfExtents(shape: Pick<WorkplaneShape, "baseRadius" | "topRadius" | "width" | "depth" | "size" | "height">) {
+  return {
+    x: shapeWidth(shape) / 2,
+    y: shape.height / 2,
+    z: shapeDepth(shape) / 2,
+  };
+}
+
+/**
+ * After editing top/base radii, set overall Length/Width to the circular
+ * footprint of the larger ring. Use Length/Width controls to scale or squash.
+ */
+export function conePatchForRadii(
+  _shape: Pick<WorkplaneShape, "baseRadius" | "topRadius" | "width" | "depth" | "size">,
+  topRadius: number,
+  baseRadius: number,
+): Partial<WorkplaneShape> {
+  const top = Math.max(0, topRadius);
+  const base = Math.max(0.001, baseRadius);
+  const footprint = Math.max(top, base) * 2;
+  return {
+    topRadius: top,
+    baseRadius: base,
+    width: footprint,
+    depth: footprint,
+    size: footprint,
+  };
+}
+
+/**
+ * Scale the whole cone when overall Length/Width change (workplane or properties).
+ * Radii follow the dominant axis scale so Top/Base stay in sync with the solid.
+ */
+export function conePatchForFootprint(
+  shape: Pick<WorkplaneShape, "baseRadius" | "topRadius" | "width" | "depth" | "size" | "height">,
+  nextWidth: number,
+  nextDepth: number,
+): Partial<WorkplaneShape> {
+  const oldW = Math.max(0.001, shapeWidth(shape));
+  const oldD = Math.max(0.001, shapeDepth(shape));
+  const width = Math.max(0.001, nextWidth);
+  const depth = Math.max(0.001, nextDepth);
+  const scaleW = width / oldW;
+  const scaleD = depth / oldD;
+  // Prefer the axis that actually changed (corner drags keep both equal).
+  const scale = Math.abs(scaleW - 1) >= Math.abs(scaleD - 1) - 1e-12 ? scaleW : scaleD;
+  return {
+    width,
+    depth,
+    size: resizedShapeSize(width, depth),
+    topRadius: coneTopRadius(shape) * scale,
+    baseRadius: coneBaseRadius(shape) * scale,
+  };
 }
 
 function edgeTreatmentPreserveZone(shape: WorkplaneShape): number {
@@ -97,7 +186,7 @@ export function proportionalResizeScale(startWidth: number, startDepth: number, 
 }
 
 export function fallbackSolidColor(shape: WorkplaneShape) {
-  if (shape.kind === "cylinder") return "#d97813";
+  if (shape.kind === "cylinder" || shape.kind === "thread") return "#d97813";
   if (shape.kind === "sphere") return "#0098c7";
   if (shape.kind === "cone") return "#6e2786";
   if (shape.kind === "pyramid") return "#f2cf10";
@@ -106,6 +195,19 @@ export function fallbackSolidColor(shape: WorkplaneShape) {
 
 export function withHoleMode(shape: WorkplaneShape, hole: boolean, parentColor?: string): WorkplaneShape {
   const color = hole ? "#b8c2cc" : (parentColor ?? fallbackSolidColor(shape));
+  // Boolean cut / union groups already encode solid vs hole roles on children.
+  // Recursing would flip cutter children to solid (or solids to holes) and break re-cuts.
+  const isBooleanGroup =
+    Boolean(shape.groupedShapes?.length)
+    && (
+      shape.id.startsWith("grouped-manifold")
+      || shape.id.startsWith("grouped-boolean")
+      || shape.id.startsWith("grouped-cut")
+      || Boolean(shape.importedMesh)
+    );
+  if (isBooleanGroup) {
+    return { ...shape, hole, color };
+  }
   return {
     ...shape,
     hole,
@@ -132,6 +234,22 @@ export function canonicalizeShape(shape: WorkplaneShape): WorkplaneShape {
     mirrorY: shape.mirrorY || undefined,
     mirrorZ: shape.mirrorZ || undefined,
   };
+  if (shape.kind === "cone") {
+    // Ensure overall footprint can contain the larger ring (do not force square —
+    // elliptical cones from Length/Width edits are preserved).
+    const maxR = coneMaxRadius(next);
+    const width = shapeWidth(next);
+    const depth = shapeDepth(next);
+    const minHalf = Math.min(width, depth) / 2;
+    if (maxR > minHalf + 1e-6) {
+      const grow = maxR / Math.max(0.001, minHalf);
+      const nextWidth = width * grow;
+      const nextDepth = depth * grow;
+      next.width = nextWidth;
+      next.depth = nextDepth;
+      next.size = resizedShapeSize(nextWidth, nextDepth);
+    }
+  }
   if (shape.groupedShapes) {
     next.groupedShapes = shape.groupedShapes.map(canonicalizeShape);
   }
@@ -171,6 +289,8 @@ export function workplaneShapesEqual(a: WorkplaneShape, b: WorkplaneShape) {
     a.segments === b.segments &&
     a.topRadius === b.topRadius &&
     a.baseRadius === b.baseRadius &&
+    a.leftAngle === b.leftAngle &&
+    a.rightAngle === b.rightAngle &&
     a.text === b.text &&
     a.font === b.font &&
     a.importedMesh === b.importedMesh &&
@@ -196,3 +316,4 @@ export function workplaneShapesEqual(a: WorkplaneShape, b: WorkplaneShape) {
 export function serializeShapesForSync(shapes: WorkplaneShape[]) {
   return JSON.stringify(shapes.map(canonicalizeShape));
 }
+

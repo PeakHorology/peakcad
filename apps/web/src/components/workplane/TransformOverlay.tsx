@@ -1,7 +1,14 @@
+"use client";
+
 import type { CSSProperties } from "react";
 import * as THREE from "three";
+import { PeakTipButton } from "@/components/workplane/ToolNameTooltip";
 import {
   measureKeyForHandle,
+  ROTATION_RING_INNER,
+  ROTATION_RING_OUTER,
+  ROTATION_RING_POINTER,
+  ROTATION_SNAP_STEP,
   type TransformOverlayProps,
   type TransformOverlayState,
 } from "@/components/workplane/transformOverlayTypes";
@@ -9,6 +16,12 @@ import {
 export {
   getElevationMeasureKey,
   measureKeyForHandle,
+  ROTATION_RING_INNER,
+  ROTATION_RING_OUTER,
+  ROTATION_RING_POINTER,
+  ROTATION_RING_LOCAL_EXTENT,
+  ROTATION_SNAP_STEP,
+  rotationWheelRadiiFromPlaneRadius,
   type DimensionMark,
   type EditingDimension,
   type EditingRotation,
@@ -20,6 +33,34 @@ export {
   type TransformHandleKind,
   type TransformOverlayState,
 } from "@/components/workplane/transformOverlayTypes";
+
+function describeRotationWedge(startDeg: number, endDeg: number, innerRadius: number, outerRadius: number) {
+  let deltaDeg = endDeg - startDeg;
+  while (deltaDeg > 180) deltaDeg -= 360;
+  while (deltaDeg < -180) deltaDeg += 360;
+  if (Math.abs(deltaDeg) < 0.01) {
+    return null;
+  }
+  const toPoint = (degrees: number, radius: number) => {
+    const radians = THREE.MathUtils.degToRad(degrees - 90);
+    return [Math.cos(radians) * radius, Math.sin(radians) * radius] as const;
+  };
+  const [ox1, oy1] = toPoint(startDeg, outerRadius);
+  const [ox2, oy2] = toPoint(endDeg, outerRadius);
+  const [ix2, iy2] = toPoint(endDeg, innerRadius);
+  const [ix1, iy1] = toPoint(startDeg, innerRadius);
+  const largeArc = Math.abs(deltaDeg) > 180 ? 1 : 0;
+  const sweep = deltaDeg >= 0 ? 1 : 0;
+  return `M ${ox1} ${oy1} A ${outerRadius} ${outerRadius} 0 ${largeArc} ${sweep} ${ox2} ${oy2} L ${ix2} ${iy2} A ${innerRadius} ${innerRadius} 0 ${largeArc} ${sweep ? 0 : 1} ${ix1} ${iy1} Z`;
+}
+
+function protractorPoint(degrees: number, radius: number) {
+  const radians = THREE.MathUtils.degToRad(degrees - 90);
+  return {
+    x: Math.cos(radians) * radius,
+    y: Math.sin(radians) * radius,
+  };
+}
 
 export function TransformOverlay({
   box,
@@ -39,6 +80,7 @@ export function TransformOverlay({
   onPinMeasure,
   onBeginDimensionEdit,
   onBeginLiftEdit,
+  onDropSelectionToWorkplane,
   onEditingDimensionChange,
   onCommitDimensionEdit,
   onCancelDimensionEdit,
@@ -50,27 +92,28 @@ export function TransformOverlay({
   const marks = measureKey ? (box.dimensions[measureKey] ?? []) : [];
   const visibleMarks = (hideDimensionMarks ? [] : marks).filter((mark) => mark.key !== editingDimension?.key);
   const handleMeasureKey = (handle: TransformOverlayState["handles"][number]) => measureKeyForHandle(handle.kind, handle.key, box);
+  // Indexed ticks live in the inner circle; the outer band is the free-rotation ring.
   const protractorTicks = Array.from({ length: 16 }, (_, index) => {
-    const degrees = index * 22.5 - 90;
+    const degrees = index * ROTATION_SNAP_STEP - 90;
     const radians = THREE.MathUtils.degToRad(degrees);
     const major = index % 2 === 0;
-    const outer = 94;
-    const inner = major ? 80 : 86;
+    const tickOuter = ROTATION_RING_INNER;
+    const tickInner = major ? ROTATION_RING_INNER - 16 : ROTATION_RING_INNER - 10;
     return {
       key: `tick-${index}`,
       major,
-      x1: Math.cos(radians) * inner,
-      y1: Math.sin(radians) * inner,
-      x2: Math.cos(radians) * outer,
-      y2: Math.sin(radians) * outer,
+      x1: Math.cos(radians) * tickInner,
+      y1: Math.sin(radians) * tickInner,
+      x2: Math.cos(radians) * tickOuter,
+      y2: Math.sin(radians) * tickOuter,
     };
   });
-  const activeAngle = rotationReadout?.angle ?? 0;
-  const activeRadians = THREE.MathUtils.degToRad(activeAngle - 90);
-  const activeLine = {
-    x: Math.cos(activeRadians) * 92,
-    y: Math.sin(activeRadians) * 92,
-  };
+  const pointerAngle = rotationReadout?.pointerAngle ?? 0;
+  const startPointerAngle = rotationReadout?.startPointerAngle ?? pointerAngle;
+  const activeLine = protractorPoint(pointerAngle, ROTATION_RING_POINTER);
+  const startLine = protractorPoint(startPointerAngle, ROTATION_RING_POINTER);
+  const activeWedge = describeRotationWedge(startPointerAngle, pointerAngle, ROTATION_RING_INNER, ROTATION_RING_OUTER);
+  const snapMode = rotationReadout?.snapMode ?? "stepped";
   const pinnedWheel = pinnedRotationWheelView?.axis === rotationWheelAxis ? pinnedRotationWheelView : null;
   const plane = pinnedWheel?.plane ?? box.rotationPlanes[rotationWheelAxis];
   const wheel = pinnedWheel?.wheel ?? box.rotationWheels[rotationWheelAxis] ?? box.rotationWheel;
@@ -78,7 +121,7 @@ export function TransformOverlay({
     <div className={`transform-overlay ${hideSelectionChrome ? "hide-selection-chrome" : ""}`} aria-hidden="true">
       {showRotationWheel && wheel && plane ? (
         <svg
-          className={`rotation-protractor-plane axis-${rotationWheelAxis}`}
+          className={`rotation-protractor-plane axis-${rotationWheelAxis} snap-${snapMode}`}
           viewBox={`0 0 ${box.width} ${box.height}`}
           preserveAspectRatio="none"
           onPointerDown={(event) => onBeginTransform("rotate", `rotate-wheel-${rotationWheelAxis}`, event)}
@@ -87,8 +130,9 @@ export function TransformOverlay({
           onPointerCancel={onFinishTransform}
         >
           <g transform={`matrix(${plane.a} ${plane.b} ${plane.c} ${plane.d} ${plane.x} ${plane.y})`}>
-            <circle className="rotation-protractor-outer" cx="0" cy="0" r="94" />
-            <circle className="rotation-protractor-inner" cx="0" cy="0" r="68" />
+            <circle className="rotation-protractor-outer" cx="0" cy="0" r={ROTATION_RING_OUTER} />
+            <circle className="rotation-protractor-inner" cx="0" cy="0" r={ROTATION_RING_INNER} />
+            {activeWedge ? <path className="rotation-active-wedge" d={activeWedge} /> : null}
             {protractorTicks.map((tick) => (
               <line
                 key={tick.key}
@@ -99,9 +143,14 @@ export function TransformOverlay({
                 y2={tick.y2}
               />
             ))}
-            <line className="rotation-zero-line" x1="0" y1="0" x2="0" y2="-92" />
+            <line className="rotation-zero-line" x1="0" y1="0" x2={startLine.x} y2={startLine.y} />
             <line className="rotation-current-line" x1="0" y1="0" x2={activeLine.x} y2={activeLine.y} />
-            <text className="rotation-zero-label" x="0" y="-75">
+            <circle className="rotation-pointer-dot" cx={activeLine.x} cy={activeLine.y} r="3.2" />
+            <text
+              className="rotation-zero-label"
+              x={startLine.x * ((ROTATION_RING_INNER - 7) / ROTATION_RING_POINTER)}
+              y={startLine.y * ((ROTATION_RING_INNER - 7) / ROTATION_RING_POINTER)}
+            >
               0&deg;
             </text>
           </g>
@@ -143,6 +192,7 @@ export function TransformOverlay({
           value={editingDimension.value}
           autoFocus
           onPointerDown={(event) => event.stopPropagation()}
+          onFocus={(event) => event.currentTarget.select()}
           onChange={(event) => onEditingDimensionChange(event.target.value)}
           onBlur={onCommitDimensionEdit}
           onKeyDown={(event) => {
@@ -162,13 +212,24 @@ export function TransformOverlay({
             autoFocus
             inputMode="decimal"
             onPointerDown={(event) => event.stopPropagation()}
+            onFocus={(event) => event.currentTarget.select()}
             onChange={(event) => onEditingRotationChange(event.target.value)}
-            onBlur={onCommitRotationEdit}
+            onBlur={() => {
+              // Commit only if the user typed a new angle; otherwise just close/bake.
+              if (editingRotation && editingRotation.value.trim() !== editingRotation.initialValue.trim()) {
+                onCommitRotationEdit();
+                return;
+              }
+              onCancelRotationEdit();
+            }}
             onKeyDown={(event) => {
               if (event.key === "Enter") {
-                onCommitRotationEdit();
+                event.preventDefault();
+                // Blur so commit/cancel runs once through onBlur.
+                event.currentTarget.blur();
               }
               if (event.key === "Escape") {
+                event.preventDefault();
                 onCancelRotationEdit();
               }
             }}
@@ -177,11 +238,11 @@ export function TransformOverlay({
         </label>
       ) : null}
       {box.handles.map((handle) => (
-        <button
+        <PeakTipButton
           key={handle.key}
+          label={handle.title}
           className={`transform-handle ${handle.className}`}
           style={{ "--overlay-x": `${handle.x}px`, "--overlay-y": `${handle.y}px` } as CSSProperties}
-          title={handle.title}
           onPointerEnter={() => onHoverMeasure(handle.kind === "lift" ? null : handleMeasureKey(handle))}
           onPointerLeave={() => onHoverMeasure(null)}
           onPointerDown={(event) => {
@@ -194,17 +255,37 @@ export function TransformOverlay({
           onClick={(event) => {
             if (handle.kind === "lift") {
               event.stopPropagation();
+              // Double-click is handled separately (drop to workplane).
+              if (event.detail >= 2) {
+                return;
+              }
               onBeginLiftEdit(handle.key, handle.x + 42, handle.y - 32);
             }
           }}
+          onDoubleClick={(event) => {
+            if (handle.kind !== "lift" || !onDropSelectionToWorkplane) {
+              return;
+            }
+            event.preventDefault();
+            event.stopPropagation();
+            onCancelDimensionEdit();
+            onDropSelectionToWorkplane();
+          }}
         />
       ))}
-      {box.rotateHandles.map((handle) => (
-        <button
+      {box.rotateHandles.map((handle) => {
+        const isYaw = handle.className.includes("axis-y");
+        return (
+        <PeakTipButton
           key={handle.key}
-          className={`rotate-handle ${handle.className}`}
-          style={{ "--overlay-x": `${handle.x}px`, "--overlay-y": `${handle.y}px`, "--rotate-handle-angle": `${handle.angle}deg` } as CSSProperties}
-          title="Rotate"
+          label={handle.title ?? "Rotate"}
+          className={`rotate-handle ${handle.className}${isYaw ? " yaw-arrows" : " tilt-circle"}`}
+          style={{
+            "--overlay-x": `${handle.x}px`,
+            "--overlay-y": `${handle.y}px`,
+            // Both handles follow the projected world tangent so icons stay model-parallel (not screen-billboarded).
+            "--rotate-handle-angle": `${handle.angle}deg`,
+          } as CSSProperties}
           onPointerDown={(event) => onBeginTransform("rotate", handle.key, event)}
           onPointerMove={(event) => onMoveTransform(event.clientX, event.clientY, event.shiftKey, event.altKey)}
           onPointerUp={onFinishTransform}
@@ -215,14 +296,49 @@ export function TransformOverlay({
           }}
         >
           <span className="rotate-handle-icon" aria-hidden="true">
-            <svg viewBox="0 0 150 150" focusable="false">
-              <path d="m145.4 67.6-12.1 7.7c-6.6-10.8-22.1-27.4-43.6-31.5-3.7-0.7-8-1.3-14.1-1.3-21.5 0-41.5 9.8-55.1 28.9l-3.3 4.1-12.4-7.9c-1.3-0.7-3 0.1-2.9 1.8l1.1 36.1c0.3 1.7 2 2.5 3.1 1.7l30.2-17.6c1.4-0.6 1.4-2.9 0-3.5l-12.1-6.7c9.7-14.8 26.4-28.5 51.2-28.6 20.5-0.1 37.4 9.8 50.7 28.6l-12 6.5c-1.6 0.6-1.5 3.3 0 3.8l30.2 17.4c1.4 0.7 3 0 3-1.7l0.8-36c0-1.5-1.5-2.6-2.7-1.8z" />
-            </svg>
+            {isYaw ? (
+              <svg viewBox="0 0 48 28" focusable="false">
+                {/*
+                  Arc ends feed into bases; heads are rotated to the end tangents
+                  (left tip up-left, right tip up-right).
+                */}
+                <path
+                  className="rotate-handle-icon-halo"
+                  d="M10 13.5Q24 20 38 13.5"
+                  fill="none"
+                  strokeLinecap="round"
+                />
+                <path
+                  className="rotate-handle-icon-arc"
+                  d="M10 13.5Q24 20 38 13.5"
+                  fill="none"
+                  strokeLinecap="round"
+                />
+                <path className="rotate-handle-icon-head" d="M1 9.3 12.7 7.6 7.3 19.4Z" />
+                <path className="rotate-handle-icon-head" d="M47 9.3 40.7 19.4 35.3 7.6Z" />
+              </svg>
+            ) : (
+              <svg viewBox="0 0 24 24" focusable="false">
+                {/* Single continuous rotate-cw glyph (arc + corner tip) — avoids a detached head. */}
+                <g className="rotate-handle-icon-halo" fill="none" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+                  <path d="M21 3v5h-5" />
+                </g>
+                <g className="rotate-handle-icon-arc" fill="none" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+                  <path d="M21 3v5h-5" />
+                </g>
+              </svg>
+            )}
           </span>
-        </button>
-      ))}
+        </PeakTipButton>
+        );
+      })}
       {!hideDimensionMarks && rotationReadout ? (
-        <div className="rotation-readout" style={{ "--overlay-x": `${rotationReadout.x}px`, "--overlay-y": `${rotationReadout.y}px` } as CSSProperties}>
+        <div
+          className={`rotation-readout ${rotationReadout.snapMode ? `snap-${rotationReadout.snapMode}` : ""}`}
+          style={{ "--overlay-x": `${rotationReadout.x}px`, "--overlay-y": `${rotationReadout.y}px` } as CSSProperties}
+        >
           {rotationReadout.text}
         </div>
       ) : null}

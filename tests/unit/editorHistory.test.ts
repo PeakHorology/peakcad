@@ -1,5 +1,16 @@
 import { describe, expect, it } from "vitest";
-import { appendEditorHistorySnapshot, boundedEditorHistory, editorHistoryEntry, hydrateEditorHistoryState, projectShapesFingerprint } from "@/lib/editorHistory";
+import {
+  appendEditorHistorySnapshot,
+  boundedEditorHistory,
+  compactHistoryShape,
+  editorHistoryEntry,
+  expandHistoryShapes,
+  historyShapeNeedsRemesh,
+  hydrateEditorHistoryState,
+  MAX_EDITOR_HISTORY_BYTES,
+  MAX_EDITOR_HISTORY_ENTRIES,
+  projectShapesFingerprint,
+} from "@/lib/editorHistory";
 import type { WorkplaneShape } from "@/types/sketchforge";
 
 function box(overrides: Partial<WorkplaneShape> = {}): WorkplaneShape {
@@ -68,9 +79,9 @@ describe("editor history snapshots", () => {
     }));
     const bounded = boundedEditorHistory(entries);
 
-    expect(bounded.length).toBeLessThanOrEqual(100);
+    expect(bounded.length).toBeLessThanOrEqual(MAX_EDITOR_HISTORY_ENTRIES);
     expect(bounded.length).toBeGreaterThanOrEqual(2);
-    expect(bounded.reduce((total, entry) => total + entry.estimatedBytes, 0)).toBeLessThanOrEqual(64 * 1024 * 1024);
+    expect(bounded.reduce((total, entry) => total + entry.estimatedBytes, 0)).toBeLessThanOrEqual(MAX_EDITOR_HISTORY_BYTES);
     expect(bounded.at(-1)?.shapes[0].id).toBe("box-139");
   });
 
@@ -106,5 +117,56 @@ describe("editor history snapshots", () => {
     expect(restored.index).toBe(0);
     expect(restored.entries).toHaveLength(1);
     expect(restored.entries[0].shapes[0].x).toBe(9);
+  });
+
+  it("strips CSG mesh caches in history without mutating the live operand children", () => {
+    const child = box({ id: "child-a", x: 4 });
+    const group = box({
+      id: "group-1",
+      kind: "mesh",
+      csg: { op: "union", version: 1 },
+      groupedShapes: [child, box({ id: "child-b", x: -4 })],
+      importedMesh: {
+        positions: [0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1],
+        baseWidth: 20,
+        baseDepth: 20,
+        baseHeight: 20,
+        triangleCount: 2,
+        sourceFormat: "json",
+      },
+    });
+
+    const compacted = compactHistoryShape(group);
+    expect(compacted.importedMesh?.positions).toEqual([]);
+    expect(compacted.importedMesh?.triangleCount).toBe(0);
+    expect(compacted.csg?.dirty).toBe(true);
+    expect(historyShapeNeedsRemesh(compacted)).toBe(true);
+    expect(group.importedMesh?.positions.length).toBeGreaterThan(8);
+    expect(compacted.groupedShapes?.[0].id).toBe("child-a");
+  });
+
+  it("externalizes import meshes into a vault and restores them on expand", () => {
+    const shape = box({
+      id: "import-1",
+      kind: "mesh",
+      importedMesh: {
+        positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],
+        baseWidth: 1,
+        baseDepth: 1,
+        baseHeight: 1,
+        triangleCount: 1,
+        sourceFormat: "stl",
+        brepStep: "ISO-10303-21;",
+      },
+    });
+    const entry = editorHistoryEntry([shape], [shape.id]);
+    expect(entry.shapes[0].importedMesh?.positions).toEqual([]);
+    expect(entry.shapes[0].importedMesh?.brepStep).toBeUndefined();
+    expect(entry.meshVault?.[shape.id]?.positions).toHaveLength(9);
+    expect(entry.meshVault?.[shape.id]?.brepStep).toBe("ISO-10303-21;");
+
+    const restored = expandHistoryShapes(entry.shapes, entry.meshVault);
+    expect(restored[0].importedMesh?.positions).toEqual(shape.importedMesh?.positions);
+    expect(restored[0].importedMesh?.brepStep).toBe("ISO-10303-21;");
   });
 });

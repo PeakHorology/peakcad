@@ -1,13 +1,51 @@
 "use client";
 
-import { ChevronUp, CornerDownRight, Home, Link, Link2Off, Minus, Plus, Split, Trash2, Waves } from "lucide-react";
+import { ChevronUp, CornerDownRight, Home, Link, Link2Off, Minus, Plus, Ruler, Split, Trash2, Waves } from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent, type WheelEvent as ReactWheelEvent } from "react";
 import { SnapGridControl } from "@/components/workplane/ShapeInspector";
+import { InlineValueDialog } from "@/components/workplane/InlineValueDialog";
+import { SketchSnapGlyph } from "@/components/workplane/SketchSnapGlyph";
+import { PeakTipButton } from "@/components/workplane/ToolNameTooltip";
+import { isDefaultSketchPlane } from "@/lib/sketchPlane";
+import { faceReferenceBounds } from "@/lib/sketchFaceReference";
+import { closedProfilesFromLegacy, CONSTRAINT_LABELS, snapSketchPoint, type SketchConstraint, type SketchDefinitionStatus, type SketchDimension, type SketchEntity, type SketchSnapResult } from "@/lib/sketch";
+import { TOOL_DESCRIPTIONS } from "@/lib/toolDescriptions";
 import { mirrorSign, resizedImportedMeshPositions } from "@/lib/workplaneShapes";
 import { DEFAULT_SNAP_GRID, DEFAULT_WORKPLANE_WORKSPACE, normalizeSnapGrid, normalizeWorkspaceSettings } from "@/lib/workplaneSettings";
 import type { GridSize, SketchImage, SketchPoint, SketchProfile, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
-export type SketchTool = "line" | "bezier" | "smooth" | "select" | "refine" | "erase" | "measure";
+export type SketchTool =
+  | "line"
+  | "bezier"
+  | "smooth"
+  | "circle"
+  | "ellipse"
+  | "square"
+  | "rectangle"
+  | "roundRect"
+  | "slot"
+  | "triangle"
+  | "polygon"
+  | "star"
+  | "arc"
+  | "offset"
+  | "select"
+  | "refine"
+  | "erase"
+  | "measure"
+  | "dimension"
+  | "trim"
+  | "fillet"
+  | "chamfer"
+  | "mirror"
+  | "pattern"
+  | "constrain-h"
+  | "constrain-v"
+  | "constrain-equal"
+  | "constrain-parallel"
+  | "constrain-perp"
+  | "constrain-tangent"
+  | "constrain-symmetry";
 export type SketchSelection =
   | { kind: "point"; id: string }
   | { kind: "segment"; id: string }
@@ -26,7 +64,31 @@ type SketchWorkspaceProps = {
   pendingMeasurementStart: SketchPoint | null;
   initialSnap?: GridSize;
   initialWorkspace?: WorkplaneWorkspaceSettings;
+  /** Keep project/3D snap in sync when the sketch Snap Grid control changes. */
+  onSnapChange?: (snap: GridSize) => void;
+  selectedProfileIds?: string[];
+  activeSnap?: SketchSnapResult | null;
+  showDimensions?: boolean;
+  dimensions?: SketchDimension[];
+  showConstraints?: boolean;
+  constraints?: SketchConstraint[];
+  constraintEntities?: SketchEntity[];
+  constraintConflicts?: string[];
+  solveStatus?: SketchDefinitionStatus;
+  solveDof?: number;
   onPlanePoint: (point: { x: number; z: number }, handles?: { handleIn: { x: number; z: number }; handleOut: { x: number; z: number } }) => void;
+  onDrawCircle: (center: { x: number; z: number }, radius: number) => void;
+  onDrawEllipse: (origin: { x: number; z: number }, corner: { x: number; z: number }) => void;
+  onDrawSquare: (origin: { x: number; z: number }, corner: { x: number; z: number }) => void;
+  onDrawRectangle: (origin: { x: number; z: number }, corner: { x: number; z: number }) => void;
+  onDrawRoundRect: (origin: { x: number; z: number }, corner: { x: number; z: number }) => void;
+  onDrawSlot: (origin: { x: number; z: number }, corner: { x: number; z: number }) => void;
+  onDrawTriangle: (center: { x: number; z: number }, vertex: { x: number; z: number }) => void;
+  onDrawPolygon: (center: { x: number; z: number }, vertex: { x: number; z: number }) => void;
+  onDrawStar: (center: { x: number; z: number }, tip: { x: number; z: number }) => void;
+  onDrawArc: (start: { x: number; z: number }, end: { x: number; z: number }, through: { x: number; z: number }) => void;
+  onOffsetSegment: (segmentId: string, toward: { x: number; z: number }) => void;
+  polygonSides?: number;
   onPointPress: (id: string) => void;
   onSelectSegment: (id: string) => void;
   onSelectMany: (pointIds: string[], segmentIds: string[], imageIds: string[]) => void;
@@ -35,11 +97,19 @@ type SketchWorkspaceProps = {
   onDeleteImage: (id: string) => void;
   onDeletePoint: (id: string) => void;
   onDeleteSegment: (id: string) => void;
+  onEraseEntities: (pointIds: string[], segmentIds: string[]) => void;
   onMovePoint: (id: string, point: { x: number; z: number }) => void;
   onMoveHandle: (id: string, handle: "in" | "out", point: { x: number; z: number }) => void;
   onInsertPoint: (segmentId: string, point: { x: number; z: number }) => void;
   onSetPointMode: (id: string, mode: "corner" | "smooth" | "split") => void;
   onClearMeasurement: () => void;
+  onSelectProfile?: (profileId: string) => void;
+  onEditDimension?: (dimensionId: string, value: number) => void;
+  onSnapResolved?: (snap: SketchSnapResult | null) => void;
+  /** Activate/deactivate the measure tool (lives on the view controls, like 3D ruler). */
+  onToolChange?: (tool: SketchTool) => void;
+  /** Optional toast/notice for empty-tool feedback (e.g. dimension on empty plate). */
+  onNotice?: (message: string) => void;
 };
 
 type PathStep = { segment: SketchSegment; from: SketchPoint; to: SketchPoint };
@@ -47,6 +117,17 @@ type DisplayPath = { id: string; points: SketchPoint[]; steps: PathStep[]; close
 type SketchReferenceFootprint = { fillD: string | null; outlineD: string | null };
 type PointerAction =
   | { kind: "bezier"; pointerId: number; origin: { x: number; z: number }; current: { x: number; z: number } }
+  | { kind: "circle"; pointerId: number; origin: { x: number; z: number }; current: { x: number; z: number } }
+  | { kind: "ellipse"; pointerId: number; origin: { x: number; z: number }; current: { x: number; z: number } }
+  | { kind: "square"; pointerId: number; origin: { x: number; z: number }; current: { x: number; z: number } }
+  | { kind: "rectangle"; pointerId: number; origin: { x: number; z: number }; current: { x: number; z: number } }
+  | { kind: "roundRect"; pointerId: number; origin: { x: number; z: number }; current: { x: number; z: number } }
+  | { kind: "slot"; pointerId: number; origin: { x: number; z: number }; current: { x: number; z: number } }
+  | { kind: "triangle"; pointerId: number; origin: { x: number; z: number }; current: { x: number; z: number } }
+  | { kind: "polygon"; pointerId: number; origin: { x: number; z: number }; current: { x: number; z: number } }
+  | { kind: "star"; pointerId: number; origin: { x: number; z: number }; current: { x: number; z: number } }
+  | { kind: "offset"; pointerId: number; segmentId: string; current: { x: number; z: number } }
+  | { kind: "erase"; pointerId: number; current: { x: number; z: number } }
   | { kind: "move-point"; pointerId: number; pointId: string; current: { x: number; z: number } }
   | { kind: "move-handle"; pointerId: number; pointId: string; handle: "in" | "out"; current: { x: number; z: number } }
   | { kind: "pan"; pointerId: number; clientX: number; clientY: number }
@@ -126,6 +207,70 @@ function formatDimension(value: number, accuracy: 1 | 2 | 3) {
   return (Math.abs(value) < threshold ? 0 : value).toFixed(accuracy);
 }
 
+const CONSTRAINT_GLYPH: Record<SketchConstraint["kind"], string> = {
+  horizontal: "H",
+  vertical: "V",
+  coincident: "●",
+  midpoint: "M",
+  parallel: "∥",
+  perpendicular: "⊥",
+  equal: "=",
+  concentric: "◎",
+  tangent: "T",
+  symmetry: "⇄",
+  fix: "🔒",
+};
+
+function sketchEntityPointIds(entity: SketchEntity): string[] {
+  switch (entity.kind) {
+    case "point":
+      return [entity.id];
+    case "line":
+    case "bezier":
+    case "smooth":
+      return [entity.startId, entity.endId];
+    case "arc":
+      return [entity.centerId, entity.startId, entity.endId];
+    case "circle":
+      return [entity.centerId];
+    default:
+      return [];
+  }
+}
+
+function constraintGlyphAnchor(
+  constraint: SketchConstraint,
+  entities: SketchEntity[],
+  pointById: Map<string, SketchPoint>,
+): { x: number; z: number } | null {
+  const centers: Array<{ x: number; z: number }> = [];
+  for (const pointId of constraint.pointIds ?? []) {
+    const point = pointById.get(pointId);
+    if (point) centers.push({ x: point.x, z: point.z });
+  }
+  for (const entityId of constraint.entityIds) {
+    const entity = entities.find((item) => item.id === entityId);
+    if (!entity) continue;
+    if (entity.kind === "point") {
+      centers.push({ x: entity.x, z: entity.z });
+      continue;
+    }
+    const pts = sketchEntityPointIds(entity)
+      .map((id) => pointById.get(id))
+      .filter((item): item is SketchPoint => Boolean(item));
+    if (!pts.length) continue;
+    centers.push({
+      x: pts.reduce((sum, p) => sum + p.x, 0) / pts.length,
+      z: pts.reduce((sum, p) => sum + p.z, 0) / pts.length,
+    });
+  }
+  if (!centers.length) return null;
+  return {
+    x: centers.reduce((sum, p) => sum + p.x, 0) / centers.length,
+    z: centers.reduce((sum, p) => sum + p.z, 0) / centers.length,
+  };
+}
+
 function dimensionPillSize(label: string, screenUnit: number, extra = 24) {
   return {
     width: Math.max(48, label.length * 7.5 + extra) * screenUnit,
@@ -140,6 +285,86 @@ function cubicPoint(start: SketchPoint, first: { x: number; z: number }, second:
     x: inverse ** 3 * start.x + 3 * inverse ** 2 * amount * first.x + 3 * inverse * amount ** 2 * second.x + amount ** 3 * end.x,
     z: inverse ** 3 * start.z + 3 * inverse ** 2 * amount * first.z + 3 * inverse * amount ** 2 * second.z + amount ** 3 * end.z,
   };
+}
+
+function distancePointToSegment(point: { x: number; z: number }, start: { x: number; z: number }, end: { x: number; z: number }) {
+  const dx = end.x - start.x;
+  const dz = end.z - start.z;
+  const lengthSq = dx * dx + dz * dz;
+  if (lengthSq < 1e-12) return Math.hypot(point.x - start.x, point.z - start.z);
+  const t = Math.max(0, Math.min(1, ((point.x - start.x) * dx + (point.z - start.z) * dz) / lengthSq));
+  return Math.hypot(point.x - (start.x + dx * t), point.z - (start.z + dz * t));
+}
+
+function distanceToSketchSegment(
+  point: { x: number; z: number },
+  segment: SketchSegment,
+  pointById: Map<string, SketchPoint>,
+) {
+  const start = pointById.get(segment.startId);
+  const end = pointById.get(segment.endId);
+  if (!start || !end) return Number.POSITIVE_INFINITY;
+  const first = start.handleOut;
+  const second = end.handleIn;
+  if (segment.kind === "line" || !first || !second) {
+    return distancePointToSegment(point, start, end);
+  }
+  let nearest = Number.POSITIVE_INFINITY;
+  let previous = start;
+  for (let index = 1; index <= 24; index += 1) {
+    const sample = cubicPoint(start, first, second, end, index / 24);
+    nearest = Math.min(nearest, distancePointToSegment(point, previous, sample));
+    previous = sample as SketchPoint;
+  }
+  return nearest;
+}
+
+function collectEraseHits(
+  tip: { x: number; z: number },
+  radius: number,
+  profile: SketchProfile,
+  pointById: Map<string, SketchPoint>,
+  pointIds: Set<string>,
+  segmentIds: Set<string>,
+) {
+  let changed = false;
+  for (const point of profile.points) {
+    if (pointIds.has(point.id)) continue;
+    if (Math.hypot(point.x - tip.x, point.z - tip.z) <= radius) {
+      pointIds.add(point.id);
+      changed = true;
+      for (const segment of profile.segments) {
+        if (segment.startId === point.id || segment.endId === point.id) {
+          if (!segmentIds.has(segment.id)) {
+            segmentIds.add(segment.id);
+          }
+        }
+      }
+    }
+  }
+  for (const segment of profile.segments) {
+    if (segmentIds.has(segment.id)) continue;
+    if (distanceToSketchSegment(tip, segment, pointById) <= radius) {
+      segmentIds.add(segment.id);
+      changed = true;
+    }
+  }
+  return changed;
+}
+
+function sampleEraseStroke(from: { x: number; z: number }, to: { x: number; z: number }, step: number) {
+  const distance = Math.hypot(to.x - from.x, to.z - from.z);
+  if (distance < 1e-6) return [to];
+  const count = Math.max(1, Math.ceil(distance / Math.max(step, 0.05)));
+  const samples: Array<{ x: number; z: number }> = [];
+  for (let index = 1; index <= count; index += 1) {
+    const t = index / count;
+    samples.push({
+      x: from.x + (to.x - from.x) * t,
+      z: from.z + (to.z - from.z) * t,
+    });
+  }
+  return samples;
 }
 
 function segmentDimension(segment: SketchSegment, pointById: Map<string, SketchPoint>) {
@@ -406,7 +631,30 @@ export function SketchWorkspace({
   pendingMeasurementStart,
   initialSnap,
   initialWorkspace,
+  onSnapChange,
+  selectedProfileIds = [],
+  activeSnap = null,
+  showDimensions = true,
+  dimensions = [],
+  showConstraints = true,
+  constraints = [],
+  constraintEntities = [],
+  constraintConflicts = [],
+  solveStatus = "empty",
+  solveDof = 0,
   onPlanePoint,
+  onDrawCircle,
+  onDrawEllipse,
+  onDrawSquare,
+  onDrawRectangle,
+  onDrawRoundRect,
+  onDrawSlot,
+  onDrawTriangle,
+  onDrawPolygon,
+  onDrawStar,
+  onDrawArc,
+  onOffsetSegment,
+  polygonSides = 6,
   onPointPress,
   onSelectSegment,
   onSelectMany,
@@ -415,21 +663,54 @@ export function SketchWorkspace({
   onDeleteImage,
   onDeletePoint,
   onDeleteSegment,
+  onEraseEntities,
   onMovePoint,
   onMoveHandle,
   onInsertPoint,
   onSetPointMode,
   onClearMeasurement,
+  onSelectProfile,
+  onEditDimension,
+  onSnapResolved,
+  onToolChange,
+  onNotice,
 }: SketchWorkspaceProps) {
   const workspace = useMemo(() => normalizeWorkspaceSettings(initialWorkspace, DEFAULT_WORKPLANE_WORKSPACE), [initialWorkspace]);
   const [snap, setSnap] = useState<GridSize>(() => normalizeSnapGrid(initialSnap, DEFAULT_SNAP_GRID));
   const [snapOpen, setSnapOpen] = useState(false);
+  const [dimensionDialog, setDimensionDialog] = useState<{ id: string; value: number } | null>(null);
+
+  // Stay aligned with the live 3D workplane Snap Grid / workspace settings.
+  useEffect(() => {
+    setSnap(normalizeSnapGrid(initialSnap, DEFAULT_SNAP_GRID));
+  }, [initialSnap]);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, z: 0 });
+  const faceFitKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const loops = profile.faceReferenceLoops ?? [];
+    if (loops.length === 0) {
+      faceFitKeyRef.current = null;
+      return;
+    }
+    const key = JSON.stringify(loops);
+    if (faceFitKeyRef.current === key) return;
+    faceFitKeyRef.current = key;
+    const bounds = faceReferenceBounds(loops);
+    if (!bounds) return;
+    setPan({ x: bounds.centerX, z: bounds.centerZ });
+    const plate = Math.max(workspace.width, workspace.depth);
+    const span = Math.max(bounds.width, bounds.depth, 8);
+    setZoom(clamp(plate / (span * 1.6), 0.75, 6));
+  }, [profile.faceReferenceLoops, workspace.depth, workspace.width]);
   const [hover, setHover] = useState<{ x: number; z: number } | null>(null);
   const [pointerAction, setPointerAction] = useState<PointerAction | null>(null);
+  const [arcDraft, setArcDraft] = useState<Array<{ x: number; z: number }>>([]);
+  const [erasePreview, setErasePreview] = useState<{ pointIds: string[]; segmentIds: string[] } | null>(null);
   const [svgSize, setSvgSize] = useState({ width: 0, height: 0 });
   const svgRef = useRef<SVGSVGElement | null>(null);
+  const eraseStrokeRef = useRef<{ pointIds: Set<string>; segmentIds: Set<string> } | null>(null);
   const width = workspace.width / zoom;
   const depth = workspace.depth / zoom;
   const screenUnit = useMemo(() => {
@@ -472,8 +753,22 @@ export function SketchWorkspace({
         }),
       };
     }
+    if (erasePreview && (erasePreview.pointIds.length || erasePreview.segmentIds.length)) {
+      const removedPoints = new Set(erasePreview.pointIds);
+      const removedSegments = new Set(erasePreview.segmentIds);
+      return {
+        ...profile,
+        points: profile.points.filter((point) => !removedPoints.has(point.id)),
+        segments: profile.segments.filter(
+          (segment) =>
+            !removedSegments.has(segment.id)
+            && !removedPoints.has(segment.startId)
+            && !removedPoints.has(segment.endId),
+        ),
+      };
+    }
     return profile;
-  }, [pointerAction, profile]);
+  }, [erasePreview, pointerAction, profile]);
   const displayImages = useMemo(() => {
     const images = profile.images ?? [];
     if (pointerAction?.kind === "move-image") {
@@ -493,7 +788,15 @@ export function SketchWorkspace({
   const selectedImage = selected?.kind === "image" ? displayImages.find((image) => image.id === selected.id) ?? null : null;
   const isPointSelected = (id: string) => selected?.kind === "point" ? selected.id === id : selected?.kind === "multiple" ? selected.pointIds.includes(id) : false;
   const isSegmentSelected = (id: string) => selected?.kind === "segment" ? selected.id === id : selected?.kind === "multiple" ? selected.segmentIds.includes(id) : false;
-  const gridStep = clamp(workspace.gridBlockSize, 1, 200);
+  // Prefer Snap Grid spacing when active so the drawn plate matches 3D snap divisions;
+  // otherwise fall back to the workplane grid block size.
+  const snapGridStep = snapStep(snap);
+  const gridStep = snapGridStep > 0
+    ? clamp(snapGridStep, 0.1, 200)
+    : clamp(workspace.gridBlockSize, 1, 200);
+  const majorEvery = snapGridStep > 0
+    ? Math.max(1, Math.round(workspace.gridBlockSize / snapGridStep) || 1)
+    : 4;
   const verticalLines = useMemo(() => {
     const lines: number[] = [];
     const start = Math.ceil((-workspace.width / 2) / gridStep) * gridStep;
@@ -507,7 +810,11 @@ export function SketchWorkspace({
     return lines;
   }, [gridStep, workspace.depth]);
 
-  const pointFromEvent = (event: { clientX: number; clientY: number }) => {
+  const pointFromEvent = (
+    event: { clientX: number; clientY: number },
+    from?: { x: number; z: number } | null,
+    options?: { snap?: boolean; excludePointIds?: readonly string[] },
+  ) => {
     const svg = svgRef.current;
     const matrix = svg?.getScreenCTM();
     if (!svg || !matrix) return null;
@@ -516,9 +823,26 @@ export function SketchWorkspace({
     screenPoint.y = event.clientY;
     const local = screenPoint.matrixTransform(matrix.inverse());
     const step = snapStep(snap);
+    const raw = {
+      x: clamp(local.x, -workspace.width / 2, workspace.width / 2),
+      z: clamp(local.y, -workspace.depth / 2, workspace.depth / 2),
+    };
+    if (options?.snap === false) {
+      onSnapResolved?.(null);
+      return raw;
+    }
+    const activePoint = activePointId ? profile.points.find((point) => point.id === activePointId) : null;
+    const snapResult = snapSketchPoint(profile, {
+      cursor: raw,
+      from: from ?? (activePoint ? { x: activePoint.x, z: activePoint.z } : null),
+      screenUnit,
+      gridStep: step > 0 ? step : undefined,
+      excludePointIds: options?.excludePointIds,
+    });
+    onSnapResolved?.(snapResult);
     return {
-      x: clamp(snapValue(local.x, step), -workspace.width / 2, workspace.width / 2),
-      z: clamp(snapValue(local.y, step), -workspace.depth / 2, workspace.depth / 2),
+      x: clamp(snapResult.x, -workspace.width / 2, workspace.width / 2),
+      z: clamp(snapResult.z, -workspace.depth / 2, workspace.depth / 2),
     };
   };
 
@@ -542,21 +866,97 @@ export function SketchWorkspace({
     setPointerAction({ kind: "pan", pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY });
   };
 
+  useEffect(() => {
+    if (tool !== "arc") {
+      setArcDraft([]);
+    }
+  }, [tool]);
+
+  useEffect(() => {
+    if (tool !== "erase") {
+      eraseStrokeRef.current = null;
+      setErasePreview(null);
+    }
+  }, [tool]);
+
+  const eraseBrushRadius = Math.max(1.25, 12 * screenUnit);
+
+  const applyEraseTip = (tip: { x: number; z: number }, stroke = eraseStrokeRef.current) => {
+    if (!stroke) return;
+    const hitMap = new Map(profile.points.map((point) => [point.id, point]));
+    const changed = collectEraseHits(tip, eraseBrushRadius, profile, hitMap, stroke.pointIds, stroke.segmentIds);
+    if (changed) {
+      setErasePreview({
+        pointIds: [...stroke.pointIds],
+        segmentIds: [...stroke.segmentIds],
+      });
+    }
+  };
+
+  const beginEraseStroke = (event: ReactPointerEvent<Element>, tip: { x: number; z: number }) => {
+    event.preventDefault();
+    event.stopPropagation();
+    svgRef.current?.setPointerCapture(event.pointerId);
+    const stroke = { pointIds: new Set<string>(), segmentIds: new Set<string>() };
+    eraseStrokeRef.current = stroke;
+    applyEraseTip(tip, stroke);
+    setPointerAction({ kind: "erase", pointerId: event.pointerId, current: tip });
+    setHover(tip);
+  };
+
+  const finishEraseStroke = () => {
+    const stroke = eraseStrokeRef.current;
+    eraseStrokeRef.current = null;
+    setErasePreview(null);
+    setPointerAction(null);
+    if (!stroke) return;
+    if (stroke.pointIds.size || stroke.segmentIds.size) {
+      onEraseEntities([...stroke.pointIds], [...stroke.segmentIds]);
+    }
+  };
+
   const handlePlanePointerDown = (event: ReactPointerEvent<SVGSVGElement>) => {
     if (event.button === 1) {
       beginPan(event);
       return;
     }
     if (event.button !== 0 || (event.target !== event.currentTarget && (event.target as Element).closest("[data-sketch-entity]"))) return;
-    const point = pointFromEvent(event);
+    const point = pointFromEvent(event, null, tool === "select" || tool === "dimension" ? { snap: false } : undefined);
     if (!point) return;
     event.preventDefault();
+    if (tool === "erase") {
+      beginEraseStroke(event, point);
+      return;
+    }
     if (tool === "bezier") {
       event.currentTarget.setPointerCapture(event.pointerId);
       setPointerAction({ kind: "bezier", pointerId: event.pointerId, origin: point, current: point });
+    } else if (
+      tool === "circle"
+      || tool === "ellipse"
+      || tool === "triangle"
+      || tool === "polygon"
+      || tool === "star"
+      || tool === "square"
+      || tool === "rectangle"
+      || tool === "roundRect"
+      || tool === "slot"
+    ) {
+      event.currentTarget.setPointerCapture(event.pointerId);
+      setPointerAction({ kind: tool, pointerId: event.pointerId, origin: point, current: point });
+    } else if (tool === "arc") {
+      const nextDraft = [...arcDraft, point];
+      if (nextDraft.length >= 3) {
+        onDrawArc(nextDraft[0], nextDraft[1], nextDraft[2]);
+        setArcDraft([]);
+      } else {
+        setArcDraft(nextDraft);
+      }
     } else if (tool === "select") {
       event.currentTarget.setPointerCapture(event.pointerId);
       setPointerAction({ kind: "marquee", pointerId: event.pointerId, origin: point, current: point });
+    } else if (tool === "dimension") {
+      onNotice?.("Select a segment to add a dimension");
     } else if (tool === "line" || tool === "smooth" || tool === "measure") {
       onPlanePoint(point);
     }
@@ -576,9 +976,22 @@ export function SketchWorkspace({
       setPointerAction({ ...pointerAction, clientX: event.clientX, clientY: event.clientY });
       return;
     }
-    const point = pointFromEvent(event);
+    const moveOptions =
+      pointerAction?.kind === "marquee"
+        ? { snap: false as const }
+        : pointerAction?.kind === "move-point"
+          ? { excludePointIds: [pointerAction.pointId] }
+          : undefined;
+    const point = pointFromEvent(event, null, moveOptions);
     setHover(point);
-    if (point && pointerAction) setPointerAction({ ...pointerAction, current: point });
+    if (!point || !pointerAction) return;
+    if (pointerAction.kind === "erase") {
+      const samples = sampleEraseStroke(pointerAction.current, point, eraseBrushRadius * 0.55);
+      for (const sample of samples) applyEraseTip(sample);
+      setPointerAction({ ...pointerAction, current: point });
+      return;
+    }
+    setPointerAction({ ...pointerAction, current: point });
   };
 
   const finishPointerAction = (event: ReactPointerEvent<SVGSVGElement>) => {
@@ -587,6 +1000,10 @@ export function SketchWorkspace({
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
     if (action.kind === "pan") {
       setPointerAction(null);
+      return;
+    }
+    if (action.kind === "erase") {
+      finishEraseStroke();
       return;
     }
     if (action.kind === "marquee") {
@@ -619,6 +1036,27 @@ export function SketchWorkspace({
         handleIn: { x: action.origin.x - dx, z: action.origin.z - dz },
         handleOut: { x: action.origin.x + dx, z: action.origin.z + dz },
       });
+    } else if (action.kind === "circle") {
+      const radius = Math.hypot(action.current.x - action.origin.x, action.current.z - action.origin.z);
+      if (radius >= 0.25) {
+        onDrawCircle(action.origin, radius);
+      }
+    } else if (action.kind === "ellipse") {
+      onDrawEllipse(action.origin, action.current);
+    } else if (action.kind === "square") {
+      onDrawSquare(action.origin, action.current);
+    } else if (action.kind === "rectangle" || action.kind === "roundRect" || action.kind === "slot") {
+      if (action.kind === "rectangle") onDrawRectangle(action.origin, action.current);
+      else if (action.kind === "roundRect") onDrawRoundRect(action.origin, action.current);
+      else onDrawSlot(action.origin, action.current);
+    } else if (action.kind === "triangle") {
+      onDrawTriangle(action.origin, action.current);
+    } else if (action.kind === "polygon") {
+      onDrawPolygon(action.origin, action.current);
+    } else if (action.kind === "star") {
+      onDrawStar(action.origin, action.current);
+    } else if (action.kind === "offset") {
+      onOffsetSegment(action.segmentId, action.current);
     } else if (action.kind === "move-point") {
       onMovePoint(action.pointId, action.current);
     } else if (action.kind === "move-handle") {
@@ -651,6 +1089,109 @@ export function SketchWorkspace({
   const measurementLabel = formatDimension(measurementLength, workspace.accuracy);
   const previewLength = activePoint && hover ? Math.hypot(hover.x - activePoint.x, hover.z - activePoint.z) : 0;
   const previewLabel = formatDimension(previewLength, workspace.accuracy);
+  const circlePreviewRadius =
+    pointerAction?.kind === "circle"
+      ? Math.hypot(pointerAction.current.x - pointerAction.origin.x, pointerAction.current.z - pointerAction.origin.z)
+      : 0;
+  const circlePreviewLabel = formatDimension(circlePreviewRadius, workspace.accuracy);
+  const radialPreview =
+    pointerAction && (pointerAction.kind === "triangle" || pointerAction.kind === "polygon" || pointerAction.kind === "star")
+      ? (() => {
+          const radius = Math.hypot(pointerAction.current.x - pointerAction.origin.x, pointerAction.current.z - pointerAction.origin.z);
+          if (radius < 0.01) return null;
+          const startAngle = Math.atan2(pointerAction.current.z - pointerAction.origin.z, pointerAction.current.x - pointerAction.origin.x);
+          let pts: Array<{ x: number; z: number }>;
+          if (pointerAction.kind === "star") {
+            const tips = 5;
+            const inner = radius * 0.382;
+            pts = Array.from({ length: tips * 2 }, (_, index) => {
+              const r = index % 2 === 0 ? radius : inner;
+              const angle = startAngle + (index * Math.PI) / tips;
+              return {
+                x: pointerAction.origin.x + Math.cos(angle) * r,
+                z: pointerAction.origin.z + Math.sin(angle) * r,
+              };
+            });
+          } else {
+            const sides = pointerAction.kind === "triangle" ? 3 : polygonSides;
+            pts = Array.from({ length: sides }, (_, index) => {
+              const angle = startAngle + (index * 2 * Math.PI) / sides;
+              return {
+                x: pointerAction.origin.x + Math.cos(angle) * radius,
+                z: pointerAction.origin.z + Math.sin(angle) * radius,
+              };
+            });
+          }
+          return {
+            radius,
+            label: formatDimension(radius, workspace.accuracy),
+            d: `${pts.map((point, index) => `${index === 0 ? "M" : "L"} ${point.x} ${point.z}`).join(" ")} Z`,
+          };
+        })()
+      : null;
+  const squarePreview =
+    pointerAction?.kind === "square"
+      ? (() => {
+          const dx = pointerAction.current.x - pointerAction.origin.x;
+          const dz = pointerAction.current.z - pointerAction.origin.z;
+          const side = Math.max(Math.abs(dx), Math.abs(dz));
+          if (side < 0.01) return null;
+          const sx = Math.sign(dx) || 1;
+          const sz = Math.sign(dz) || 1;
+          const x = Math.min(pointerAction.origin.x, pointerAction.origin.x + sx * side);
+          const z = Math.min(pointerAction.origin.z, pointerAction.origin.z + sz * side);
+          return { x, z, side, label: formatDimension(side, workspace.accuracy) };
+        })()
+      : null;
+  const boxPreview =
+    pointerAction && (pointerAction.kind === "ellipse" || pointerAction.kind === "rectangle" || pointerAction.kind === "roundRect" || pointerAction.kind === "slot")
+      ? (() => {
+          const width = Math.abs(pointerAction.current.x - pointerAction.origin.x);
+          const height = Math.abs(pointerAction.current.z - pointerAction.origin.z);
+          if (width < 0.01 || height < 0.01) return null;
+          const x = Math.min(pointerAction.origin.x, pointerAction.current.x);
+          const z = Math.min(pointerAction.origin.z, pointerAction.current.z);
+          const rx = pointerAction.kind === "roundRect" ? Math.min(width, height) * 0.22 : pointerAction.kind === "slot" ? Math.min(width, height) / 2 : 0;
+          return {
+            kind: pointerAction.kind,
+            x,
+            z,
+            width,
+            height,
+            rx,
+            label: `${formatDimension(width, workspace.accuracy)} × ${formatDimension(height, workspace.accuracy)}`,
+          };
+        })()
+      : null;
+  const offsetPreview =
+    pointerAction?.kind === "offset"
+      ? (() => {
+          const segment = profile.segments.find((entry) => entry.id === pointerAction.segmentId);
+          const start = segment ? pointById.get(segment.startId) : null;
+          const end = segment ? pointById.get(segment.endId) : null;
+          if (!start || !end) return null;
+          const dx = end.x - start.x;
+          const dz = end.z - start.z;
+          const length = Math.hypot(dx, dz);
+          if (length < 0.01) return null;
+          const nx = -dz / length;
+          const nz = dx / length;
+          const mid = { x: (start.x + end.x) / 2, z: (start.z + end.z) / 2 };
+          const side = (pointerAction.current.x - mid.x) * nx + (pointerAction.current.z - mid.z) * nz;
+          const distance = Math.abs(side);
+          const ox = nx * Math.sign(side || 1) * distance;
+          const oz = nz * Math.sign(side || 1) * distance;
+          return {
+            x1: start.x + ox,
+            z1: start.z + oz,
+            x2: end.x + ox,
+            z2: end.z + oz,
+            label: formatDimension(distance, workspace.accuracy),
+            midX: mid.x + ox,
+            midZ: mid.z + oz,
+          };
+        })()
+      : null;
   const labelOffset = 22 * screenUnit;
   const pointRadius = 5 * screenUnit;
   const controlPointRadius = 6 * screenUnit;
@@ -677,14 +1218,69 @@ export function SketchWorkspace({
     () => new Map(referenceShapes.map((shape) => [shape.id, importedMeshFootprint(shape)])),
     [referenceShapes],
   );
+  const showReferenceFootprints = isDefaultSketchPlane(profile.sketchPlane);
+  const faceReferenceLoops = profile.faceReferenceLoops ?? [];
+  const hostShapeName = profile.sketchPlane?.hostShapeId
+    ? referenceShapes.find((shape) => shape.id === profile.sketchPlane?.hostShapeId)?.name
+    : null;
+  const barrelSketch = profile.sketchPlane?.surface?.kind === "cylinder";
+  const planeBanner = hostShapeName
+    ? barrelSketch
+      ? `Unwrapped ${hostShapeName} — up/down = height, left/right = around`
+      : `Sketching on ${hostShapeName} face`
+    : profile.sketchPlane && !isDefaultSketchPlane(profile.sketchPlane)
+      ? barrelSketch
+        ? "Unwrapped barrel — up/down = height, left/right = around"
+        : "Sketching on selected face"
+      : null;
 
   return (
     <main className="sketch-workspace-stage">
       <div className="sketch-mode-badge">Sketch view</div>
+      {solveStatus !== "empty" ? (
+        <div
+          className={`sketch-solve-strip status-${solveStatus}${constraintConflicts.length ? " has-conflicts" : ""}`}
+          aria-live="polite"
+        >
+          <span className="sketch-solve-status">
+            {solveStatus === "fully-defined"
+              ? "Fully defined"
+              : solveStatus === "over-constrained"
+                ? "Over-constrained"
+                : solveStatus === "unsolved"
+                  ? "Not solved"
+                  : "Under-defined"}
+          </span>
+          <span className="sketch-solve-dof">DOF {solveDof}</span>
+          {constraintConflicts.length > 0 ? (
+            <span className="sketch-solve-conflicts">{constraintConflicts.length} conflict{constraintConflicts.length === 1 ? "" : "s"}</span>
+          ) : null}
+        </div>
+      ) : null}
+      {planeBanner ? <div className="sketch-plane-banner">{planeBanner}</div> : null}
       <div className="camera-controls sketch-camera-controls" aria-label="Sketch view controls">
         <button aria-label="Reset sketch view" onClick={() => { setZoom(1); setPan({ x: 0, z: 0 }); }}><Home size={28} /></button>
         <button aria-label="Zoom in" onClick={() => setZoom((value) => clamp(value * 1.25, 0.75, 6))}><Plus size={33} /></button>
         <button aria-label="Zoom out" onClick={() => setZoom((value) => clamp(value / 1.25, 0.75, 6))}><Minus size={33} /></button>
+        <div className="ruler-control-group">
+          <PeakTipButton
+            className={tool === "measure" ? "active" : ""}
+            label="Measure"
+            description={TOOL_DESCRIPTIONS.measure}
+            aria-pressed={tool === "measure"}
+            onClick={() => {
+              if (!onToolChange) return;
+              if (tool === "measure") {
+                onToolChange("select");
+                onClearMeasurement();
+                return;
+              }
+              onToolChange("measure");
+            }}
+          >
+            <Ruler size={26} strokeWidth={2.2} aria-hidden="true" />
+          </PeakTipButton>
+        </div>
       </div>
       <section className="sketch-plate-wrap" aria-label="2D sketch plate">
         <svg
@@ -695,15 +1291,29 @@ export function SketchWorkspace({
           onPointerDown={handlePlanePointerDown}
           onPointerMove={handlePointerMove}
           onPointerUp={finishPointerAction}
-          onPointerCancel={() => setPointerAction(null)}
+          onPointerCancel={(event) => {
+            if (pointerAction?.kind === "erase" && pointerAction.pointerId === event.pointerId) {
+              finishEraseStroke();
+              return;
+            }
+            setPointerAction(null);
+          }}
           onPointerLeave={() => !pointerAction && setHover(null)}
           onWheel={handleWheel}
         >
           <rect className="sketch-plate-background" x={-workspace.width / 2} y={-workspace.depth / 2} width={workspace.width} height={workspace.depth} />
           {workspace.showGrid ? (
             <g className="sketch-grid" pointerEvents="none">
-              {verticalLines.map((x, index) => <line className={Math.abs(x) < 0.0001 ? "axis" : index % 4 === 0 ? "major" : "minor"} key={`x-${x}`} x1={x} y1={-workspace.depth / 2} x2={x} y2={workspace.depth / 2} />)}
-              {horizontalLines.map((z, index) => <line className={Math.abs(z) < 0.0001 ? "axis" : index % 4 === 0 ? "major" : "minor"} key={`z-${z}`} x1={-workspace.width / 2} y1={z} x2={workspace.width / 2} y2={z} />)}
+              {verticalLines.map((x) => {
+                const atOrigin = Math.abs(x) < 0.0001;
+                const major = !atOrigin && Math.round(Math.abs(x) / gridStep) % majorEvery === 0;
+                return <line className={atOrigin ? "axis" : major ? "major" : "minor"} key={`x-${x}`} x1={x} y1={-workspace.depth / 2} x2={x} y2={workspace.depth / 2} />;
+              })}
+              {horizontalLines.map((z) => {
+                const atOrigin = Math.abs(z) < 0.0001;
+                const major = !atOrigin && Math.round(Math.abs(z) / gridStep) % majorEvery === 0;
+                return <line className={atOrigin ? "axis" : major ? "major" : "minor"} key={`z-${z}`} x1={-workspace.width / 2} y1={z} x2={workspace.width / 2} y2={z} />;
+              })}
             </g>
           ) : null}
           <g className="sketch-reference-images">
@@ -744,24 +1354,50 @@ export function SketchWorkspace({
             ))}
           </g>
           <g className="sketch-reference-shapes" pointerEvents="none">
-            {referenceShapes.filter((shape) => !shape.hidden).map((shape) => {
-              const footprint = referenceFootprints.get(shape.id);
-              return (
-                <g key={shape.id} transform={`rotate(${shape.rotation ?? 0} ${shape.x} ${shape.z})`}>
-                  {footprint?.fillD || footprint?.outlineD ? (
-                    <>
-                      {footprint.fillD ? <path className="sketch-reference-mesh-face" d={footprint.fillD} /> : null}
-                      {footprint.outlineD ? <path className="sketch-reference-mesh-outline" d={footprint.outlineD} /> : null}
-                    </>
-                  ) : isRoundReference(shape) ? (
-                    <ellipse cx={shape.x} cy={shape.z} rx={shape.width / 2} ry={shape.depth / 2} />
-                  ) : (
-                    <rect x={shape.x - shape.width / 2} y={shape.z - shape.depth / 2} width={shape.width} height={shape.depth} />
-                  )}
-                </g>
-              );
-            })}
+            {showReferenceFootprints
+              ? referenceShapes.filter((shape) => !shape.hidden).map((shape) => {
+                  const footprint = referenceFootprints.get(shape.id);
+                  return (
+                    <g key={shape.id} transform={`rotate(${shape.rotation ?? 0} ${shape.x} ${shape.z})`}>
+                      {footprint?.fillD || footprint?.outlineD ? (
+                        <>
+                          {footprint.fillD ? <path className="sketch-reference-mesh-face" d={footprint.fillD} /> : null}
+                          {footprint.outlineD ? <path className="sketch-reference-mesh-outline" d={footprint.outlineD} /> : null}
+                        </>
+                      ) : isRoundReference(shape) ? (
+                        <ellipse cx={shape.x} cy={shape.z} rx={shape.width / 2} ry={shape.depth / 2} />
+                      ) : (
+                        <rect x={shape.x - shape.width / 2} y={shape.z - shape.depth / 2} width={shape.width} height={shape.depth} />
+                      )}
+                    </g>
+                  );
+                })
+              : null}
           </g>
+          {faceReferenceLoops.length > 0 ? (
+            <g className="sketch-face-reference" pointerEvents="none">
+              {faceReferenceLoops.map((loop, index) => {
+                if (loop.length < 2) return null;
+                const d = `M ${loop.map((point) => `${point.x} ${point.z}`).join(" L ")} Z`;
+                return <path key={`face-ref-${index}`} className="sketch-face-reference-loop" d={d} />;
+              })}
+              {barrelSketch && faceReferenceLoops[0]?.length >= 4 ? (() => {
+                const xs = faceReferenceLoops[0].map((point) => point.x);
+                const zs = faceReferenceLoops[0].map((point) => point.z);
+                const midX = (Math.min(...xs) + Math.max(...xs)) / 2;
+                const midZ = (Math.min(...zs) + Math.max(...zs)) / 2;
+                const topZ = Math.min(...zs);
+                const rightX = Math.max(...xs);
+                const labelSize = Math.max(2.2, Math.min(Math.max(...xs) - Math.min(...xs), Math.max(...zs) - Math.min(...zs)) * 0.06);
+                return (
+                  <g className="sketch-barrel-axis-labels" fontSize={labelSize}>
+                    <text x={midX} y={topZ - labelSize * 0.35} textAnchor="middle">height</text>
+                    <text x={rightX + labelSize * 0.35} y={midZ} textAnchor="start" dominantBaseline="middle">around</text>
+                  </g>
+                );
+              })() : null}
+            </g>
+          ) : null}
           <rect className="sketch-plate-border" x={-workspace.width / 2} y={-workspace.depth / 2} width={workspace.width} height={workspace.depth} pointerEvents="none" />
           {pointerAction?.kind === "marquee" ? (
             <rect
@@ -773,8 +1409,26 @@ export function SketchWorkspace({
               pointerEvents="none"
             />
           ) : null}
-          <g className="sketch-profile-fills" pointerEvents="none">
-            {paths.some((path) => path.closed) ? <path d={paths.filter((path) => path.closed).map(pathData).join(" ")} /> : null}
+          <g className="sketch-profile-fills">
+            {closedProfilesFromLegacy(displayProfile).map((closedProfile) => {
+              const path = paths.find((entry) => entry.closed && entry.points.some((point) => point.id === closedProfile.pointIds[0]));
+              if (!path) return null;
+              const selected = selectedProfileIds.includes(closedProfile.id);
+              return (
+                <path
+                  key={closedProfile.id}
+                  className={selected ? "selected-profile" : ""}
+                  d={pathData(path)}
+                  pointerEvents="auto"
+                  onPointerDown={(event) => {
+                    if (event.button !== 0 || tool !== "select" || !onSelectProfile) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onSelectProfile(closedProfile.id);
+                  }}
+                />
+              );
+            })}
           </g>
           <g className="sketch-segments">
             {displayProfile.segments.map((segment) => (
@@ -788,9 +1442,12 @@ export function SketchWorkspace({
                   event.preventDefault();
                   event.stopPropagation();
                   if (event.button === 1) beginPan(event);
-                  else if (tool === "erase") onDeleteSegment(segment.id);
+                  else if (event.button === 0 && tool === "erase" && point) beginEraseStroke(event, point);
                   else if (event.button === 0 && tool === "refine" && point) onInsertPoint(segment.id, point);
-                  else if (event.button === 0) onSelectSegment(segment.id);
+                  else if (event.button === 0 && tool === "offset" && point) {
+                    svgRef.current?.setPointerCapture(event.pointerId);
+                    setPointerAction({ kind: "offset", pointerId: event.pointerId, segmentId: segment.id, current: point });
+                  } else if (event.button === 0) onSelectSegment(segment.id);
                 }}
               />
             ))}
@@ -829,6 +1486,143 @@ export function SketchWorkspace({
               <circle cx={pointerAction.origin.x} cy={pointerAction.origin.z} r={controlPointRadius} />
             </g>
           ) : null}
+          {pointerAction?.kind === "circle" && circlePreviewRadius > 0 ? (
+            <g className="sketch-circle-preview" pointerEvents="none">
+              <line
+                className="sketch-preview-line"
+                x1={pointerAction.origin.x}
+                y1={pointerAction.origin.z}
+                x2={pointerAction.current.x}
+                y2={pointerAction.current.z}
+              />
+              <circle
+                className="sketch-preview-circle"
+                cx={pointerAction.origin.x}
+                cy={pointerAction.origin.z}
+                r={circlePreviewRadius}
+              />
+              <circle cx={pointerAction.origin.x} cy={pointerAction.origin.z} r={controlPointRadius} className="sketch-cursor-point" />
+              <g
+                className="sketch-segment-dimensions preview"
+                transform={`translate(${(pointerAction.origin.x + pointerAction.current.x) / 2} ${(pointerAction.origin.z + pointerAction.current.z) / 2 - labelOffset})`}
+              >
+                {(() => {
+                  const pill = dimensionPillSize(circlePreviewLabel, screenUnit, 18);
+                  return (
+                    <>
+                      <rect x={-pill.width / 2} y={-pill.height / 2} width={pill.width} height={pill.height} rx={pill.radius} />
+                      <text y={5 * screenUnit} fontSize={13 * screenUnit}>{circlePreviewLabel}</text>
+                    </>
+                  );
+                })()}
+              </g>
+            </g>
+          ) : null}
+          {squarePreview ? (
+            <g className="sketch-shape-preview" pointerEvents="none">
+              <rect className="sketch-preview-circle" x={squarePreview.x} y={squarePreview.z} width={squarePreview.side} height={squarePreview.side} />
+              <g className="sketch-segment-dimensions preview" transform={`translate(${squarePreview.x + squarePreview.side / 2} ${squarePreview.z - labelOffset})`}>
+                {(() => {
+                  const pill = dimensionPillSize(squarePreview.label, screenUnit, 18);
+                  return (
+                    <>
+                      <rect x={-pill.width / 2} y={-pill.height / 2} width={pill.width} height={pill.height} rx={pill.radius} />
+                      <text y={5 * screenUnit} fontSize={13 * screenUnit}>{squarePreview.label}</text>
+                    </>
+                  );
+                })()}
+              </g>
+            </g>
+          ) : null}
+          {boxPreview ? (
+            <g className="sketch-shape-preview" pointerEvents="none">
+              {boxPreview.kind === "ellipse" ? (
+                <ellipse
+                  className="sketch-preview-circle"
+                  cx={boxPreview.x + boxPreview.width / 2}
+                  cy={boxPreview.z + boxPreview.height / 2}
+                  rx={boxPreview.width / 2}
+                  ry={boxPreview.height / 2}
+                />
+              ) : (
+                <rect
+                  className="sketch-preview-circle"
+                  x={boxPreview.x}
+                  y={boxPreview.z}
+                  width={boxPreview.width}
+                  height={boxPreview.height}
+                  rx={boxPreview.rx}
+                  ry={boxPreview.rx}
+                />
+              )}
+              <g
+                className="sketch-segment-dimensions preview"
+                transform={`translate(${boxPreview.x + boxPreview.width / 2} ${boxPreview.z - labelOffset})`}
+              >
+                {(() => {
+                  const pill = dimensionPillSize(boxPreview.label, screenUnit, 18);
+                  return (
+                    <>
+                      <rect x={-pill.width / 2} y={-pill.height / 2} width={pill.width} height={pill.height} rx={pill.radius} />
+                      <text y={5 * screenUnit} fontSize={13 * screenUnit}>{boxPreview.label}</text>
+                    </>
+                  );
+                })()}
+              </g>
+            </g>
+          ) : null}
+          {radialPreview && pointerAction && (pointerAction.kind === "triangle" || pointerAction.kind === "polygon" || pointerAction.kind === "star") ? (
+            <g className="sketch-shape-preview" pointerEvents="none">
+              <line className="sketch-preview-line" x1={pointerAction.origin.x} y1={pointerAction.origin.z} x2={pointerAction.current.x} y2={pointerAction.current.z} />
+              <path className="sketch-preview-circle" d={radialPreview.d} />
+              <g
+                className="sketch-segment-dimensions preview"
+                transform={`translate(${(pointerAction.origin.x + pointerAction.current.x) / 2} ${(pointerAction.origin.z + pointerAction.current.z) / 2 - labelOffset})`}
+              >
+                {(() => {
+                  const pill = dimensionPillSize(radialPreview.label, screenUnit, 18);
+                  return (
+                    <>
+                      <rect x={-pill.width / 2} y={-pill.height / 2} width={pill.width} height={pill.height} rx={pill.radius} />
+                      <text y={5 * screenUnit} fontSize={13 * screenUnit}>{radialPreview.label}</text>
+                    </>
+                  );
+                })()}
+              </g>
+            </g>
+          ) : null}
+          {offsetPreview ? (
+            <g className="sketch-shape-preview" pointerEvents="none">
+              <line className="sketch-preview-line" x1={offsetPreview.x1} y1={offsetPreview.z1} x2={offsetPreview.x2} y2={offsetPreview.z2} />
+              <g className="sketch-segment-dimensions preview" transform={`translate(${offsetPreview.midX} ${offsetPreview.midZ - labelOffset})`}>
+                {(() => {
+                  const pill = dimensionPillSize(offsetPreview.label, screenUnit, 18);
+                  return (
+                    <>
+                      <rect x={-pill.width / 2} y={-pill.height / 2} width={pill.width} height={pill.height} rx={pill.radius} />
+                      <text y={5 * screenUnit} fontSize={13 * screenUnit}>{offsetPreview.label}</text>
+                    </>
+                  );
+                })()}
+              </g>
+            </g>
+          ) : null}
+          {arcDraft.length > 0 ? (
+            <g className="sketch-shape-preview" pointerEvents="none">
+              {arcDraft.map((point, index) => (
+                <circle key={`arc-draft-${index}`} className="sketch-cursor-point" cx={point.x} cy={point.z} r={controlPointRadius} />
+              ))}
+              {arcDraft.length === 1 && hover ? (
+                <line className="sketch-preview-line" x1={arcDraft[0].x} y1={arcDraft[0].z} x2={hover.x} y2={hover.z} />
+              ) : null}
+              {arcDraft.length === 2 ? (
+                <>
+                  <line className="sketch-preview-line" x1={arcDraft[0].x} y1={arcDraft[0].z} x2={arcDraft[1].x} y2={arcDraft[1].z} />
+                  {hover ? <circle className="sketch-preview-circle" cx={hover.x} cy={hover.z} r={hoverPointRadius} /> : null}
+                </>
+              ) : null}
+            </g>
+          ) : null}
           {measurement ? (
             <g className="sketch-measurement">
               <line x1={measurement.start.x} y1={measurement.start.z} x2={measurement.end.x} y2={measurement.end.z} />
@@ -837,12 +1631,20 @@ export function SketchWorkspace({
               <g
                 className="sketch-measurement-pill"
                 role="button"
+                tabIndex={0}
                 aria-label="Remove measurement"
                 transform={`translate(${(measurement.start.x + measurement.end.x) / 2} ${(measurement.start.z + measurement.end.z) / 2 - labelOffset})`}
                 onPointerDown={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
                   onClearMeasurement();
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " " || event.key === "Escape" || event.key === "Delete" || event.key === "Backspace") {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onClearMeasurement();
+                  }
                 }}
               >
                 <rect x={-dimensionPillSize(measurementLabel, screenUnit, 30).width / 2} y={-dimensionPillSize(measurementLabel, screenUnit, 30).height / 2} width={dimensionPillSize(measurementLabel, screenUnit, 30).width} height={dimensionPillSize(measurementLabel, screenUnit, 30).height} rx={dimensionPillSize(measurementLabel, screenUnit, 30).radius} />
@@ -878,7 +1680,9 @@ export function SketchWorkspace({
                   event.stopPropagation();
                   if (event.button === 1) {
                     beginPan(event);
-                  } else if (tool === "erase" || tool === "refine") {
+                  } else if (event.button === 0 && tool === "erase") {
+                    beginEraseStroke(event, { x: point.x, z: point.z });
+                  } else if (tool === "refine") {
                     onDeletePoint(point.id);
                   } else if (event.button === 0 && tool === "select") {
                     onPointPress(point.id);
@@ -955,7 +1759,101 @@ export function SketchWorkspace({
               ))}
             </g>
           ) : null}
-          {hover && ["line", "bezier", "smooth", "measure"].includes(tool) ? <circle className="sketch-cursor-point" cx={hover.x} cy={hover.z} r={hoverPointRadius} pointerEvents="none" /> : null}
+          {hover && ["line", "bezier", "smooth", "circle", "square", "triangle", "polygon", "arc", "measure"].includes(tool) ? (
+            <circle className="sketch-cursor-point" cx={hover.x} cy={hover.z} r={hoverPointRadius} pointerEvents="none" />
+          ) : null}
+          {tool === "erase" && (hover || (pointerAction?.kind === "erase" ? pointerAction.current : null)) ? (
+            (() => {
+              const tip = hover ?? (pointerAction?.kind === "erase" ? pointerAction.current : null);
+              if (!tip) return null;
+              return (
+                <g className="sketch-eraser-tip" pointerEvents="none">
+                  <circle className="sketch-eraser-brush" cx={tip.x} cy={tip.z} r={eraseBrushRadius} />
+                  <g transform={`translate(${tip.x + eraseBrushRadius * 0.35} ${tip.z - eraseBrushRadius * 1.15}) scale(${screenUnit * 1.15})`}>
+                    <path
+                      className="sketch-eraser-glyph"
+                      d="M2 18 L14 6 L20 12 L8 24 Z M14 6 L17 3 L23 9 L20 12 Z"
+                    />
+                  </g>
+                </g>
+              );
+            })()
+          ) : null}
+          {activeSnap && activeSnap.kind !== "grid" ? (
+            <SketchSnapGlyph
+              kind={activeSnap.kind}
+              x={activeSnap.x}
+              z={activeSnap.z}
+              screenUnit={screenUnit}
+            />
+          ) : null}
+          {showDimensions && dimensions.length > 0 ? (
+            <g className="sketch-driving-dimensions">
+              {dimensions.map((dimension) => {
+                const label = `${dimension.value.toFixed(2)}`;
+                const pill = dimensionPillSize(label, screenUnit, 18);
+                let x = dimension.labelOffset?.x ?? 0;
+                let z = dimension.labelOffset?.z ?? 0;
+                if (dimension.entityIds[0]) {
+                  const segment = displayProfile.segments.find((entry) => entry.id === dimension.entityIds[0]);
+                  const dim = segment ? segmentDimension(segment, pointById) : null;
+                  if (dim) {
+                    x = dim.midpoint.x;
+                    z = dim.midpoint.z - labelOffset;
+                  }
+                }
+                if (dimension.pointIds && dimension.pointIds.length >= 2) {
+                  const a = pointById.get(dimension.pointIds[0]);
+                  const b = pointById.get(dimension.pointIds[1]);
+                  if (a && b) {
+                    x = (a.x + b.x) / 2;
+                    z = (a.z + b.z) / 2 - labelOffset;
+                  }
+                }
+                return (
+                  <g
+                    key={dimension.id}
+                    className={dimension.driving ? "driving" : "driven"}
+                    transform={`translate(${x} ${z})`}
+                    onDoubleClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      if (!onEditDimension || !dimension.driving) return;
+                      setDimensionDialog({ id: dimension.id, value: dimension.value });
+                    }}
+                  >
+                    <rect x={-pill.width / 2} y={-pill.height / 2} width={pill.width} height={pill.height} rx={pill.radius} />
+                    <text y={5 * screenUnit} fontSize={13 * screenUnit}>{label}</text>
+                  </g>
+                );
+              })}
+            </g>
+          ) : null}
+          {showConstraints && constraints.length > 0 ? (
+            <g className="sketch-constraint-glyphs" pointerEvents="none">
+              {constraints.filter((constraint) => !constraint.suppressed).map((constraint, index) => {
+                const anchor = constraintGlyphAnchor(constraint, constraintEntities, pointById);
+                if (!anchor) return null;
+                const glyph = CONSTRAINT_GLYPH[constraint.kind] ?? CONSTRAINT_LABELS[constraint.kind]?.[0] ?? "?";
+                const conflict = constraintConflicts.includes(constraint.id);
+                const size = 16 * screenUnit;
+                // Fan overlapping glyphs slightly so stacked constraints stay readable.
+                const offsetX = (index % 3) * 4 * screenUnit;
+                const offsetZ = -18 * screenUnit - Math.floor(index / 3) * 4 * screenUnit;
+                return (
+                  <g
+                    key={constraint.id}
+                    className={`sketch-constraint-glyph${conflict ? " conflict" : ""}`}
+                    transform={`translate(${anchor.x + offsetX} ${anchor.z + offsetZ})`}
+                  >
+                    <title>{CONSTRAINT_LABELS[constraint.kind]}{conflict ? " (conflict)" : ""}</title>
+                    <circle r={size * 0.55} />
+                    <text y={4 * screenUnit} fontSize={11 * screenUnit}>{glyph}</text>
+                  </g>
+                );
+              })}
+            </g>
+          ) : null}
         </svg>
       </section>
       {selectedImage && tool === "select" ? (
@@ -969,14 +1867,36 @@ export function SketchWorkspace({
       ) : null}
       {selectedPoint && tool === "select" ? (
         <div className="sketch-point-actions" aria-label="Point actions">
-          <button type="button" title="Make corner" onClick={() => onSetPointMode(selectedPoint.id, "corner")}><CornerDownRight /><span>Corner</span></button>
-          <button type="button" title="Make smooth" onClick={() => onSetPointMode(selectedPoint.id, "smooth")}><Waves /><span>Smooth</span></button>
-          <button type="button" title="Split handles" onClick={() => onSetPointMode(selectedPoint.id, "split")}><Split /><span>Split</span></button>
+          <button type="button" onClick={() => onSetPointMode(selectedPoint.id, "corner")}><CornerDownRight /><span>Corner</span></button>
+          <button type="button" onClick={() => onSetPointMode(selectedPoint.id, "smooth")}><Waves /><span>Smooth</span></button>
+          <button type="button" onClick={() => onSetPointMode(selectedPoint.id, "split")}><Split /><span>Split</span></button>
         </div>
       ) : null}
       <div className="grid-settings sketch-grid-settings">
-        <SnapGridControl snap={snap} snapOpen={snapOpen} onSnapChange={setSnap} onSnapOpenChange={setSnapOpen} />
+        <SnapGridControl
+          snap={snap}
+          snapOpen={snapOpen}
+          onSnapChange={(next) => {
+            setSnap(next);
+            onSnapChange?.(typeof next === "function" ? next(snap) : next);
+          }}
+          onSnapOpenChange={setSnapOpen}
+        />
       </div>
+      {dimensionDialog ? (
+        <InlineValueDialog
+          title="Edit dimension"
+          fields={[{ key: "value", label: "Dimension value", value: String(dimensionDialog.value), unit: "mm", min: 0 }]}
+          confirmLabel="Apply"
+          onCancel={() => setDimensionDialog(null)}
+          onConfirm={(values) => {
+            const value = Number.parseFloat(values.value ?? "");
+            const { id } = dimensionDialog;
+            setDimensionDialog(null);
+            if (Number.isFinite(value) && value > 0) onEditDimension?.(id, value);
+          }}
+        />
+      ) : null}
     </main>
   );
 }
@@ -1007,14 +1927,14 @@ function SketchImageInspector({
   return (
     <aside className="shape-inspector sketch-image-inspector" aria-label={`${image.name} image settings`} onPointerDown={(event) => event.stopPropagation()}>
       <div className="shape-inspector-header">
-        <button className="inspector-header-icon" type="button" aria-label="Close image settings" onClick={onClose}>
+        <PeakTipButton className="inspector-header-icon" label="Close image settings" onClick={onClose}>
           <ChevronUp size={26} strokeWidth={2.8} />
-        </button>
+        </PeakTipButton>
         <strong>{image.name}</strong>
         <div className="inspector-header-actions">
-          <button className="inspector-header-icon danger" type="button" aria-label="Delete sketch image" title="Delete image" onClick={onDelete}>
+          <PeakTipButton className="inspector-header-icon danger" label="Delete image" onClick={onDelete}>
             <Trash2 size={25} strokeWidth={2.2} />
-          </button>
+          </PeakTipButton>
         </div>
       </div>
       <div className="sketch-image-preview-card">
@@ -1027,14 +1947,18 @@ function SketchImageInspector({
           <SketchImageRange label="Width" value={image.width} min={0.5} max={200} accuracy={accuracy} onChange={updateWidth} />
           <SketchImageRange label="Height" value={image.depth} min={0.5} max={200} accuracy={accuracy} onChange={updateDepth} />
           <SketchImageRange label="Opacity" value={(image.opacity ?? 0.55) * 100} min={5} max={100} accuracy={1} suffix="%" onChange={(opacity) => onUpdate({ opacity: opacity / 100 }, "Sketch image opacity updated")} />
-          <label className="sketch-image-position-field">
-            <span>Position X</span>
-            <input type="number" step="0.1" value={Number(image.x.toFixed(accuracy))} onChange={(event) => onUpdate({ x: Number(event.currentTarget.value) || 0 }, "Sketch image moved")} />
-          </label>
-          <label className="sketch-image-position-field">
-            <span>Position Y</span>
-            <input type="number" step="0.1" value={Number(image.z.toFixed(accuracy))} onChange={(event) => onUpdate({ z: Number(event.currentTarget.value) || 0 }, "Sketch image moved")} />
-          </label>
+          <SketchImagePosition
+            label="Position X"
+            value={image.x}
+            accuracy={accuracy}
+            onCommit={(x) => onUpdate({ x }, "Sketch image moved")}
+          />
+          <SketchImagePosition
+            label="Position Y"
+            value={image.z}
+            accuracy={accuracy}
+            onCommit={(z) => onUpdate({ z }, "Sketch image moved")}
+          />
           <button className={`sketch-image-aspect-toggle ${image.lockAspect !== false ? "active" : ""}`} type="button" onClick={() => onUpdate({ lockAspect: image.lockAspect === false }, "Image aspect ratio setting updated")}>
             {image.lockAspect !== false ? <Link size={17} /> : <Link2Off size={17} />}
             <span>{image.lockAspect !== false ? "Aspect ratio locked" : "Aspect ratio unlocked"}</span>
@@ -1042,6 +1966,50 @@ function SketchImageInspector({
         </div>
       </div>
     </aside>
+  );
+}
+
+/**
+ * Position entry that commits on blur rather than on every keystroke.
+ *
+ * Writing straight through on change meant a half-typed value was parsed and echoed back: a leading
+ * minus or a trailing decimal point evaluated to NaN or a truncated number, so the field snapped
+ * back and negative and sub-accuracy positions could not be typed at all.
+ */
+function SketchImagePosition({
+  label,
+  value,
+  accuracy,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  accuracy: 1 | 2 | 3;
+  onCommit: (value: number) => void;
+}) {
+  const safeValue = Number.isFinite(value) ? value : 0;
+  const [draft, setDraft] = useState(formatDimension(safeValue, accuracy));
+  useEffect(() => setDraft(formatDimension(safeValue, accuracy)), [accuracy, safeValue]);
+  const commit = () => {
+    const parsed = Number(draft);
+    if (draft.trim() !== "" && Number.isFinite(parsed)) onCommit(parsed);
+    else setDraft(formatDimension(safeValue, accuracy));
+  };
+  return (
+    <label className="sketch-image-position-field">
+      <span>{label}</span>
+      <input
+        type="number"
+        step={accuracy === 1 ? 0.1 : 0.01}
+        value={draft}
+        onChange={(event) => setDraft(event.currentTarget.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") event.currentTarget.blur();
+          if (event.key === "Escape") setDraft(formatDimension(safeValue, accuracy));
+        }}
+      />
+    </label>
   );
 }
 

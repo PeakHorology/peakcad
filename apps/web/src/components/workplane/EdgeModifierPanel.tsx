@@ -112,6 +112,7 @@ function EdgeModifierSlider({
                 event.stopPropagation();
                 setDraft(formatSliderValue(controlValue, workspace.accuracy, controlStep));
                 setEditing(false);
+                event.currentTarget.blur();
               }
             }}
           />
@@ -216,7 +217,7 @@ export function EdgeModifierPanel({
       </div>
 
       <div className="edge-modifier-selection-help">
-        {prepared ? "Click highlighted model edges to toggle them. Hold Shift to add or remove a single edge." : "Loading CAD edge data from the local browser worker."}
+        {prepared ? "Click highlighted model edges to toggle them. Hold Shift to add or remove a single edge." : "Loading CAD edge data from the local worker."}
       </div>
 
       <div className="edge-modifier-quick-actions">
@@ -288,6 +289,7 @@ export function EdgeModifierPanel({
           <option value="draft">Draft</option>
           <option value="standard">Standard</option>
           <option value="fine">Fine</option>
+          <option value="ultra">Ultra</option>
         </select>
       </label>
 

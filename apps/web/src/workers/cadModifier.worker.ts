@@ -1,18 +1,39 @@
 /// <reference lib="webworker" />
 
-import { OcctKernel, type ShapeHandle } from "occt-wasm";
-import type { CadModifierComponentMesh, CadModifierDisplayEdge, CadModifierEdge, CadModifierMeshPart, CadModifierPrimitivePart, CadModifierQuality, CadModifierWorkerRequest, CadModifierWorkerResponse } from "@/lib/cadModifierTypes";
-import { CAD_MODIFIER_RUNTIME_BASE } from "@/lib/cadModifierRuntime";
+import type { OcctKernel, ShapeHandle } from "occt-wasm";
+import type {
+  CadCylindricalFace,
+  CadModifierComponentMesh,
+  CadModifierDisplayEdge,
+  CadModifierEdge,
+  CadModifierMeshPart,
+  CadModifierPrimitivePart,
+  CadModifierQuality,
+  CadModifierWorkerRequest,
+  CadModifierWorkerResponse,
+} from "@/lib/cadModifierTypes";
+import { inferThreadSideFromFace, resolveThreadParams, type ResolvedThreadParams } from "@/lib/metricThreads";
 
 const HASH_UPPER_BOUND = 2_147_483_647;
 const CAD_EDGE_WIREFRAME_DEFLECTION = 0.035;
 const CAD_DISPLAY_EDGE_MIN_ANGLE = 0.75;
 const CURVED_SURFACE_TYPES = new Set(["cylinder", "cone", "sphere", "torus", "bspline", "bezier", "offset", "revolution", "extrusion"]);
+/**
+ * Staged public OCCT runtime. Keep this constant local so the worker never imports
+ * `@/lib/cadModifierRuntime` (that module evaluates hardwareProfile at load time and
+ * can crash Worker startup via `process` / window assumptions).
+ */
+const CAD_MODIFIER_RUNTIME_BASE = "/occt";
+/** Typed as string so the dynamic import is runtime-resolved (same pattern as brepKernel). */
+const OCCT_INDEX_URL: string = `${CAD_MODIFIER_RUNTIME_BASE}/index.js`;
+const OCCT_WASM_URL = `${CAD_MODIFIER_RUNTIME_BASE}/occt-wasm.wasm`;
 let kernelPromise: Promise<OcctKernel> | null = null;
 let baseShape: ShapeHandle | null = null;
 let baseSolids: ShapeHandle[] = [];
 let edgeHandles: ShapeHandle[] = [];
 let edgeOwners: number[] = [];
+let cylindricalFaceHandles: ShapeHandle[] = [];
+let cylindricalFaces: CadCylindricalFace[] = [];
 
 type CollectedCadEdgeGeometry = Omit<CadModifierEdge, "display" | "selectable"> & {
   curveType: string;
@@ -25,13 +46,21 @@ function post(message: CadModifierWorkerResponse, transfer: Transferable[] = [])
   self.postMessage(message, { transfer });
 }
 
+/**
+ * Load OCCT from the staged public/occt copy — never from the webpack worker chunk.
+ * Bundling occt-wasm into the worker made OcctKernel.init()'s relative
+ * `import("./occt-wasm.js")` resolve under `/_next/static/chunks/` (404), which
+ * killed fillet/chamfer. Match the STEP exporter path instead.
+ */
 function kernel() {
-  const moduleUrl = `${CAD_MODIFIER_RUNTIME_BASE}/occt-wasm.js`;
-  kernelPromise ??= import(/* webpackIgnore: true */ moduleUrl).then((imported: { default: (options?: { locateFile?: (path: string) => string }) => Promise<unknown> }) => imported.default({
-    locateFile: (path) => path.endsWith(".wasm") ? `${CAD_MODIFIER_RUNTIME_BASE}/occt-wasm.wasm` : path,
-  })).then((module) => {
-    const KernelConstructor = OcctKernel as unknown as new (rawModule: unknown) => OcctKernel;
-    return new KernelConstructor(module);
+  kernelPromise ??= (async () => {
+    const occt = (await import(/* webpackIgnore: true */ OCCT_INDEX_URL)) as {
+      OcctKernel: { init: (options?: { wasm?: string }) => Promise<OcctKernel> };
+    };
+    return occt.OcctKernel.init({ wasm: OCCT_WASM_URL });
+  })().catch((error) => {
+    kernelPromise = null;
+    throw error;
   });
   return kernelPromise;
 }
@@ -46,6 +75,8 @@ function releaseSession(cad: OcctKernel) {
   baseSolids = [];
   edgeHandles = [];
   edgeOwners = [];
+  cylindricalFaceHandles = [];
+  cylindricalFaces = [];
 }
 
 function cadShapeIsValid(cad: OcctKernel, shape: ShapeHandle) {
@@ -160,8 +191,23 @@ function applyCadTransform(cad: OcctKernel, shape: ShapeHandle, transform: numbe
 }
 
 function reconstructPrimitiveSolid(cad: OcctKernel, primitive: CadModifierPrimitivePart) {
+  if (primitive.kind === "cylinder") {
+    const radius = primitive.radius;
+    const height = primitive.height;
+    if (![radius, height].every((value) => Number.isFinite(value) && value > 0)) {
+      throw new Error("The selected cylinder has invalid dimensions");
+    }
+    // OCCT cylinders are Z-up from z=0..height; rotate −90° about X into SketchForge Y-up.
+    let solid = cad.makeCylinder(radius, height);
+    solid = cad.rotate(solid, { point: { x: 0, y: 0, z: 0 }, direction: { x: 1, y: 0, z: 0 } }, -Math.PI / 2);
+    const transformed = applyCadTransform(cad, solid, primitive.transform);
+    if (!cad.isSolid(transformed) || !cadShapeIsValid(cad, transformed)) {
+      throw new Error("The selected cylinder could not be prepared as a valid CAD solid");
+    }
+    return transformed;
+  }
   if (primitive.kind !== "box") {
-    throw new Error(`Unsupported CAD primitive: ${primitive.kind}`);
+    throw new Error(`Unsupported CAD primitive: ${(primitive as { kind: string }).kind}`);
   }
   const width = primitive.width;
   const depth = primitive.depth;
@@ -235,7 +281,17 @@ function reconstructSolid(cad: OcctKernel, part: CadModifierMeshPart) {
 function reconstructParts(cad: OcctKernel, parts: CadModifierMeshPart[]) {
   const solids = parts.filter((part) => !part.hole).map((part) => reconstructSolid(cad, part));
   const holes = parts.filter((part) => part.hole).map((part) => reconstructSolid(cad, part));
-  if (solids.length === 0) throw new Error("The group has no solid body to modify");
+  // Hole-only selection (e.g. thread a hole cutter before grouping) treats the hole body as the solid.
+  if (solids.length === 0) {
+    if (holes.length === 0) throw new Error("The group has no solid body to modify");
+    let holeBody = holes[0];
+    for (let index = 1; index < holes.length; index += 1) {
+      holeBody = cad.fuse(holeBody, holes[index]);
+      holeBody = cad.simplify(holeBody);
+      holeBody = cad.unifySameDomain(holeBody);
+    }
+    return holeBody;
+  }
   let result = solids[0];
   for (let index = 1; index < solids.length; index += 1) {
     result = cad.fuse(result, solids[index]);
@@ -368,6 +424,7 @@ function cadDisplayEdgesFromCollected(edges: CollectedCadEdge[]): CadModifierDis
 
 function tessellationOptions(quality: CadModifierQuality, amount: number) {
   if (quality === "draft") return { linearDeflection: Math.max(0.12, amount / 3), angularDeflection: 0.42 };
+  if (quality === "ultra") return { linearDeflection: Math.max(0.012, amount / 20), angularDeflection: 0.06 };
   if (quality === "fine") return { linearDeflection: Math.max(0.025, amount / 12), angularDeflection: 0.1 };
   return { linearDeflection: Math.max(0.055, amount / 7), angularDeflection: 0.2 };
 }
@@ -393,8 +450,342 @@ function isMissingValidatorFault(message: string) {
   return /isValid/i.test(message) && /null|not a function|undefined/i.test(message);
 }
 
-self.onmessage = async (event: MessageEvent<CadModifierWorkerRequest>) => {
-  const request = event.data;
+/**
+ * The OCCT Emscripten runtime (`occt-wasm.js` / `.wasm`) is loaded lazily via a raw
+ * dynamic `import()` from `/occt/`, staged into `public/occt` at dev/build time by
+ * `scripts/copy-occt-wasm.mjs` (see predev/prebuild/preexport hooks). If that staging
+ * step didn't run — or the packaged app shipped without it — the fetch 404s or returns
+ * the SPA fallback HTML, and the browser rejects the dynamic import with one of these
+ * messages depending on engine. This is distinct from a worker module load failure
+ * (`cadModifierWorkerFailureMessage`), which means the worker script itself never ran.
+ */
+function isRuntimeModuleLoadFault(message: string) {
+  return /failed to fetch dynamically imported module|error loading dynamically imported module|expected a javascript(?:-| )?module script|error resolving module specifier/i.test(message);
+}
+
+function vecLength(v: { x: number; y: number; z: number }) {
+  return Math.hypot(v.x, v.y, v.z);
+}
+
+function normalizeVec(v: { x: number; y: number; z: number }) {
+  const length = vecLength(v) || 1;
+  return { x: v.x / length, y: v.y / length, z: v.z / length };
+}
+
+function crossVec(a: { x: number; y: number; z: number }, b: { x: number; y: number; z: number }) {
+  return {
+    x: a.y * b.z - a.z * b.y,
+    y: a.z * b.x - a.x * b.z,
+    z: a.x * b.y - a.y * b.x,
+  };
+}
+
+function collectCylindricalFaces(cad: OcctKernel, shape: ShapeHandle, solids: ShapeHandle[]): {
+  handles: ShapeHandle[];
+  faces: CadCylindricalFace[];
+} {
+  const faces = cad.getSubShapes(shape, "face");
+  const solidCenter = cad.getCenterOfMass(shape);
+  const handles: ShapeHandle[] = [];
+  const collected: CadCylindricalFace[] = [];
+  try {
+    faces.forEach((face) => {
+      if (cad.surfaceType(face) !== "cylinder") return;
+      const cyl = cad.getFaceCylinderData(face);
+      if (!cyl || !(cyl.radius > 1e-6)) return;
+      const bounds = cad.uvBounds(face);
+      const u0 = bounds.uMin;
+      const u1 = bounds.uMax;
+      const v0 = bounds.vMin;
+      const v1 = bounds.vMax;
+      const um = (u0 + u1) / 2;
+      const vm = (v0 + v1) / 2;
+      let n1 = cad.surfaceNormal(face, u0, vm);
+      let n2 = cad.surfaceNormal(face, u1, vm);
+      if (cad.shapeOrientation(face) === "reversed") {
+        n1 = { x: -n1.x, y: -n1.y, z: -n1.z };
+        n2 = { x: -n2.x, y: -n2.y, z: -n2.z };
+      }
+      let axis = normalizeVec(crossVec(n1, n2));
+      if (vecLength(axis) < 1e-6) {
+        const n3 = cad.surfaceNormal(face, um, v0);
+        axis = normalizeVec(crossVec(n1, n3));
+      }
+      if (vecLength(axis) < 1e-6) {
+        axis = { x: 0, y: 1, z: 0 };
+      }
+      const faceCenter = cad.getSurfaceCenterOfMass(face);
+      const sample = cad.pointOnSurface(face, um, vm);
+      const radial = normalizeVec({
+        x: sample.x - faceCenter.x,
+        y: sample.y - faceCenter.y,
+        z: sample.z - faceCenter.z,
+      });
+      // Re-fit axis so it stays orthogonal to a radial sample when the cross product is noisy.
+      if (vecLength(radial) > 1e-6) {
+        const corrected = normalizeVec(crossVec(radial, crossVec(axis, radial)));
+        if (vecLength(corrected) > 1e-6) axis = corrected;
+      }
+      const box = cad.getBoundingBox(face, true);
+      const corners = [
+        { x: box.xmin, y: box.ymin, z: box.zmin },
+        { x: box.xmax, y: box.ymin, z: box.zmin },
+        { x: box.xmin, y: box.ymax, z: box.zmin },
+        { x: box.xmax, y: box.ymax, z: box.zmin },
+        { x: box.xmin, y: box.ymin, z: box.zmax },
+        { x: box.xmax, y: box.ymin, z: box.zmax },
+        { x: box.xmin, y: box.ymax, z: box.zmax },
+        { x: box.xmax, y: box.ymax, z: box.zmax },
+      ];
+      let minProj = Infinity;
+      let maxProj = -Infinity;
+      corners.forEach((corner) => {
+        const proj = (corner.x - faceCenter.x) * axis.x + (corner.y - faceCenter.y) * axis.y + (corner.z - faceCenter.z) * axis.z;
+        minProj = Math.min(minProj, proj);
+        maxProj = Math.max(maxProj, proj);
+      });
+      const height = Math.max(0.1, maxProj - minProj);
+      const origin = {
+        x: faceCenter.x + axis.x * minProj,
+        y: faceCenter.y + axis.y * minProj,
+        z: faceCenter.z + axis.z * minProj,
+      };
+      const outwardNormal = normalizeVec({
+        x: sample.x - (origin.x + axis.x * height * 0.5),
+        y: sample.y - (origin.y + axis.y * height * 0.5),
+        z: sample.z - (origin.z + axis.z * height * 0.5),
+      });
+      const side = inferThreadSideFromFace({
+        faceCenter: sample,
+        outwardNormal,
+        solidCenter,
+      });
+      let points: number[] = [];
+      try {
+        const wire = cad.outerWire(face);
+        const wireData = cad.wireframe(wire, CAD_EDGE_WIREFRAME_DEFLECTION);
+        points = Array.from(wireData.points);
+        cad.release(wire);
+      } catch {
+        points = [
+          origin.x, origin.y, origin.z,
+          origin.x + axis.x * height, origin.y + axis.y * height, origin.z + axis.z * height,
+        ];
+      }
+      let owner = 0;
+      for (let index = 0; index < solids.length; index += 1) {
+        try {
+          if (cad.containsPoint(solids[index], sample, 1e-4) || cad.containsPoint(solids[index], faceCenter, 1e-4)) {
+            owner = index;
+            break;
+          }
+        } catch {
+          // keep searching
+        }
+      }
+      const id = collected.length;
+      handles.push(face);
+      collected.push({
+        id,
+        owner,
+        radius: cyl.radius,
+        height,
+        side,
+        origin,
+        axis,
+        points,
+      });
+    });
+    return { handles, faces: collected };
+  } finally {
+    // Face handles we keep are retained in `handles`; release the rest.
+    const kept = new Set(handles);
+    faces.forEach((face) => {
+      if (!kept.has(face)) cad.release(face);
+    });
+  }
+}
+
+function orthonormalFrame(axis: { x: number; y: number; z: number }) {
+  const a = normalizeVec(axis);
+  const helper = Math.abs(a.y) < 0.9 ? { x: 0, y: 1, z: 0 } : { x: 1, y: 0, z: 0 };
+  const u = normalizeVec(crossVec(helper, a));
+  const v = crossVec(a, u);
+  return { axis: a, u, v };
+}
+
+function releaseQuiet(cad: OcctKernel, handle: ShapeHandle | null | undefined) {
+  if (handle === null || handle === undefined) return;
+  try {
+    cad.release(handle);
+  } catch {
+    // already consumed/released
+  }
+}
+
+/**
+ * Build a helical V-tooth ridge by piping a triangular profile along a helix.
+ * The root is embedded slightly into the selected face so fuse/cut has volume overlap
+ * (a tooth that only kisses the surface as a line usually fails boolean validation).
+ */
+function buildHelicalToothRidge(
+  cad: OcctKernel,
+  face: CadCylindricalFace,
+  params: ResolvedThreadParams,
+  _quality: CadModifierQuality,
+) {
+  const { axis, u } = orthonormalFrame(face.axis);
+  const length = Math.max(params.pitch * 1.05, Math.min(params.length, face.height));
+  const pitch = Math.max(0.15, params.pitch);
+  if (length < pitch * 0.75) {
+    throw new Error("Thread length must be at least about one pitch on this face");
+  }
+  // Always seat on the selected face radius (preset major Ø is only a guide).
+  const rootR = Math.max(0.2, face.radius);
+  const depth = Math.min(Math.max(0.08, params.depth), rootR * 0.4);
+  const embed = Math.min(depth * 0.55, rootR * 0.18);
+  const innerR = Math.max(0.05, rootR - embed);
+  const tipR = rootR + depth;
+  const halfWidth = Math.min(pitch * 0.34, length * 0.4);
+
+  const o = face.origin;
+  // Profile in the axis–radial plane at the helix start (embedded root → outer tip).
+  const rootA = {
+    x: o.x + u.x * innerR - axis.x * halfWidth,
+    y: o.y + u.y * innerR - axis.y * halfWidth,
+    z: o.z + u.z * innerR - axis.z * halfWidth,
+  };
+  const tip = {
+    x: o.x + u.x * tipR,
+    y: o.y + u.y * tipR,
+    z: o.z + u.z * tipR,
+  };
+  const rootB = {
+    x: o.x + u.x * innerR + axis.x * halfWidth,
+    y: o.y + u.y * innerR + axis.y * halfWidth,
+    z: o.z + u.z * innerR + axis.z * halfWidth,
+  };
+
+  const e1 = cad.makeLineEdge(rootA, tip);
+  const e2 = cad.makeLineEdge(tip, rootB);
+  const e3 = cad.makeLineEdge(rootB, rootA);
+  const profile = cad.makeWire([e1, e2, e3]);
+  let helix = cad.makeHelixWire(o, axis, pitch, length, rootR);
+  let mirroredHelix: ShapeHandle | null = null;
+  if (params.handedness === "left") {
+    mirroredHelix = cad.mirror(helix, o, u);
+    releaseQuiet(cad, helix);
+    helix = mirroredHelix;
+  }
+
+  try {
+    let ridge: ShapeHandle;
+    try {
+      ridge = cad.pipe(profile, helix);
+    } catch {
+      ridge = cad.simplePipe(profile, helix);
+    }
+    if (!cad.isSolid(ridge)) {
+      // Some pipe results are shells — try to solidify.
+      try {
+        const solidified = cad.makeSolid(ridge);
+        releaseQuiet(cad, ridge);
+        ridge = solidified;
+      } catch {
+        // keep original
+      }
+    }
+    if (!cad.isSolid(ridge)) {
+      releaseQuiet(cad, ridge);
+      throw new Error("Could not build a solid helical tooth from these thread dimensions");
+    }
+    return ridge;
+  } finally {
+    releaseQuiet(cad, profile);
+    releaseQuiet(cad, e1);
+    releaseQuiet(cad, e2);
+    releaseQuiet(cad, e3);
+    releaseQuiet(cad, helix);
+  }
+}
+
+function applyThreadCut(
+  cad: OcctKernel,
+  solid: ShapeHandle,
+  face: CadCylindricalFace,
+  request: Extract<CadModifierWorkerRequest, { type: "previewThread" }>,
+) {
+  const params = resolveThreadParams({
+    majorDiameter: request.majorDiameter,
+    pitch: request.pitch,
+    length: Math.min(request.length, face.height),
+    depth: request.depth,
+    side: request.side,
+    handedness: request.handedness,
+  });
+  if (params.pitch >= face.height) {
+    throw new Error("Pitch is larger than this face height — shorten the pitch or use a taller cylinder");
+  }
+  if (Math.abs(params.majorDiameter / 2 - face.radius) / Math.max(face.radius, 1e-6) > 0.45) {
+    throw new Error(
+      `Thread size Ø${params.majorDiameter} mm does not match this face (~Ø${(face.radius * 2).toFixed(2)} mm). Pick a closer metric size or use Custom.`,
+    );
+  }
+
+  const ridge = buildHelicalToothRidge(cad, face, params, request.quality);
+  try {
+    let combined: ShapeHandle;
+    try {
+      // External: fuse the helical tooth onto the cylinder. Internal: cut into the bore wall.
+      combined = params.side === "external" ? cad.fuse(solid, ridge) : cad.cut(solid, ridge);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error ?? "");
+      throw new Error(
+        `Thread boolean failed${detail ? ` (${detail})` : ""}. Try Draft quality, a shorter length, or a pitch that fits the face.`,
+      );
+    }
+
+    let result = combined;
+    try {
+      const simplified = cad.unifySameDomain(cad.simplify(combined));
+      if (simplified !== combined) {
+        releaseQuiet(cad, combined);
+      }
+      result = simplified;
+    } catch {
+      result = combined;
+    }
+
+    if (!cad.isSolid(result)) {
+      releaseQuiet(cad, result);
+      throw new Error("Thread boolean did not produce a solid — try a shorter thread length");
+    }
+
+    // Strict B-Rep validity can fail on aggressive helix booleans even when the
+    // mesh is usable. Accept solids that tessellate cleanly.
+    if (!cadShapeIsValid(cad, result)) {
+      try {
+        const probe = cad.tessellate(result, { linearDeflection: 0.25, angularDeflection: 0.55 });
+        if (!probe.triangleCount) {
+          throw new Error("empty tessellation");
+        }
+      } catch {
+        releaseQuiet(cad, result);
+        throw new Error(
+          "Thread boolean produced unusable geometry. Try a smaller pitch, shorter length, or Draft quality.",
+        );
+      }
+    }
+    return result;
+  } finally {
+    releaseQuiet(cad, ridge);
+  }
+}
+
+/** Serialize prepare/preview/dispose so concurrent requests cannot corrupt the shared OCCT session. */
+let cadModifierQueue: Promise<void> = Promise.resolve();
+
+async function handleCadModifierRequest(request: CadModifierWorkerRequest) {
   let cad: OcctKernel | null = null;
   try {
     cad = await kernel();
@@ -432,16 +823,59 @@ self.onmessage = async (event: MessageEvent<CadModifierWorkerRequest>) => {
       } finally {
         ownerEdgeHandles.forEach((componentEdges) => releaseHandles(activeCad, componentEdges));
       }
+      const cyl = collectCylindricalFaces(activeCad, baseShape, baseSolids);
+      cylindricalFaceHandles = cyl.handles;
+      cylindricalFaces = cyl.faces;
       post({
         type: "ready",
         requestId: request.requestId,
         edges: collected.edges.map((edge) => ({ ...edge, owner: edgeOwners[edge.id] ?? 0 })),
         selectableEdgeIds: collected.selectableEdgeIds,
+        cylindricalFaces,
         sourceType: activeCad.getShapeType(baseShape),
       });
       return;
     }
     if (baseShape === null) throw new Error("Prepare an object before previewing the modifier");
+    if (request.type === "previewThread") {
+      const face = cylindricalFaces.find((entry) => entry.id === request.faceId);
+      if (!face) throw new Error("Select a highlighted cylindrical face");
+      let result: ShapeHandle | null = null;
+      try {
+        result = applyThreadCut(activeCad, baseShape, face, request);
+        if (!cadShapeIsValid(activeCad, result)) throw new Error("The thread parameters create invalid geometry on this face");
+        const options = tessellationOptions(request.quality, request.depth);
+        const mesh = copyCadMesh(activeCad.tessellate(result, options));
+        const displayEdges = collectEdges(activeCad, result, 0).displayEdges;
+        const brep = activeCad.toBREP(result);
+        let step: string | undefined;
+        try {
+          step = activeCad.exportStep(result);
+        } catch {
+          step = undefined;
+        }
+        post(
+          {
+            type: "preview",
+            requestId: request.requestId,
+            positions: mesh.positions,
+            normals: mesh.normals,
+            indices: mesh.indices,
+            triangleCount: mesh.triangleCount,
+            brep,
+            step,
+            displayEdges,
+          },
+          [mesh.positions.buffer, mesh.normals.buffer, mesh.indices.buffer],
+        );
+      } finally {
+        if (result !== null) activeCad.release(result);
+      }
+      return;
+    }
+    if (request.type !== "preview") {
+      throw new Error("Unsupported CAD modifier request");
+    }
     const selected = request.edgeIds.map((id) => ({ edge: edgeHandles[id], owner: edgeOwners[id] })).filter((entry): entry is { edge: ShapeHandle; owner: number } => entry.edge !== undefined);
     if (selected.length === 0) throw new Error("Select at least one highlighted edge");
     const componentResults: ShapeHandle[] = [];
@@ -465,6 +899,12 @@ self.onmessage = async (event: MessageEvent<CadModifierWorkerRequest>) => {
       const mesh = copyCadMesh(activeCad.tessellate(result, options));
       const displayEdges = collectEdges(activeCad, result, 0).displayEdges;
       const brep = activeCad.toBREP(result);
+      let step: string | undefined;
+      try {
+        step = activeCad.exportStep(result);
+      } catch {
+        step = undefined;
+      }
       const components: CadModifierComponentMesh[] = componentResults.map((component, owner) => {
         const componentMesh = copyCadMesh(activeCad.tessellate(component, options));
         return {
@@ -478,7 +918,7 @@ self.onmessage = async (event: MessageEvent<CadModifierWorkerRequest>) => {
         };
       });
       post(
-        { type: "preview", requestId: request.requestId, positions: mesh.positions, normals: mesh.normals, indices: mesh.indices, triangleCount: mesh.triangleCount, brep, displayEdges, components },
+        { type: "preview", requestId: request.requestId, positions: mesh.positions, normals: mesh.normals, indices: mesh.indices, triangleCount: mesh.triangleCount, brep, step, displayEdges, components },
         [
           mesh.positions.buffer,
           mesh.normals.buffer,
@@ -492,6 +932,17 @@ self.onmessage = async (event: MessageEvent<CadModifierWorkerRequest>) => {
     }
   } catch (error) {
     const rawMessage = error instanceof Error ? error.message : String(error ?? "");
+    if (isRuntimeModuleLoadFault(rawMessage)) {
+      // The kernel loader itself never resolved, so there is no live OCCT session to release.
+      kernelPromise = null;
+      post({
+        type: "error",
+        requestId: request.requestId,
+        message: "The CAD engine files (OCCT) are missing or failed to load from /occt. Reinstall PeakCAD, or if you're developing locally, run `npm run copy:occt` and reload the page.",
+        resetSession: true,
+      });
+      return;
+    }
     if (isWasmMemoryFault(rawMessage) || isImportStlWasmFault(rawMessage) || isMissingValidatorFault(rawMessage)) {
       if (cad) releaseSession(cad);
       kernelPromise = null;
@@ -514,6 +965,16 @@ self.onmessage = async (event: MessageEvent<CadModifierWorkerRequest>) => {
     if (request.type === "prepare" && cad) releaseSession(cad);
     post({ type: "error", requestId: request.requestId, message });
   }
+}
+
+self.onmessage = (event: MessageEvent<CadModifierWorkerRequest>) => {
+  const request = event.data;
+  cadModifierQueue = cadModifierQueue
+    .then(() => handleCadModifierRequest(request))
+    .catch((error) => {
+      const message = error instanceof Error ? error.message : String(error ?? "CAD worker queue failed");
+      post({ type: "error", requestId: request.requestId, message });
+    });
 };
 
 export {};
