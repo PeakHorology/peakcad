@@ -1,25 +1,12 @@
 # PeakCAD — Getting Started
 
-PeakCAD is local-first CAD from **PeakHorologyLLC** (Beta 0.9.x) — Tinkercad-easy authoring with exact STEP when possible. See [docs/BETA-LIMITATIONS.md](docs/BETA-LIMITATIONS.md) for known Beta gaps.
+PeakCAD is a **local Windows desktop** CAD app from **PeakHorologyLLC** (Beta 0.9.x). There is no hosted, browser-SaaS, or LAN edition. See [docs/BETA-LIMITATIONS.md](docs/BETA-LIMITATIONS.md) for known Beta gaps.
 
-## Quick start (every time you want to use the app)
-
-1. Open **PowerShell** or **Terminal** in Cursor.
-2. Run these commands:
+## Use PeakCAD (the app)
 
 ```powershell
 cd path\to\peakcad
-npm run dev
-```
-
-3. Open your browser to: **http://localhost:3000**
-4. Leave the terminal open while you use the app.
-5. Press `Ctrl+C` in the terminal when you are done.
-
-## Package as a desktop app
-
-```powershell
-cd path\to\peakcad
+npm install
 npm run package:desktop
 ```
 
@@ -28,7 +15,7 @@ This creates files in the `dist-release/` folder:
 - `PeakCAD-Setup-0.9.11.exe` — installer (adds Start Menu + Desktop shortcut; version matches `package.json`)
 - `PeakCAD-0.9.11-portable.exe` — portable build (no install needed; not an upgrader)
 
-Close any running PeakCAD window before packaging.
+Close any running PeakCAD window before packaging. Run the Setup or portable exe — that is PeakCAD.
 
 ### Upgrade an existing install
 
@@ -43,6 +30,17 @@ You do **not** need to uninstall PeakCAD first. The Setup installer upgrades in 
 If a pinned taskbar icon looks wrong after an upgrade, unpin it and pin the Start Menu/Desktop shortcut again (Windows caches icons aggressively).
 
 The portable `.exe` is a separate copy you can run side-by-side; it does not upgrade an installed PeakCAD.
+
+## Build from source (developers)
+
+For UI work in Cursor, you can preview the same editor on this machine only:
+
+```powershell
+cd path\to\peakcad
+npm run dev
+```
+
+Open **http://127.0.0.1:3000** on this computer. Leave the terminal open. Press `Ctrl+C` when you are done. Nothing is served to the network as a PeakCAD product.
 
 ## Branding
 
@@ -81,5 +79,6 @@ Runs typecheck, unit tests, and STEP e2e (OpenCascade).
 | Problem | Fix |
 |---------|-----|
 | `node` or `npm` not recognized | Close and reopen your terminal |
-| Port 3000 already in use | Stop other dev servers |
-| Page won't load | Make sure `npm run dev` is still running |
+| Port 3000 already in use | Stop other local dev servers |
+| Preview page won't load | Make sure `npm run dev` is still running |
+| Desktop app won't start | Close every PeakCAD window and run the new Setup exe |

@@ -34,10 +34,10 @@ body:
     validations:
       required: true
   - type: input
-    id: browser
+    id: app-version
     attributes:
-      label: Browser and OS
-      placeholder: Chrome on Windows 11
+      label: PeakCAD version and Windows
+      placeholder: PeakCAD 0.9.11 on Windows 11
   - type: textarea
     id: media
     attributes:

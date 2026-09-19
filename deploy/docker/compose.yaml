@@ -1,9 +1,0 @@
-services:
-  peakcad:
-    image: peakcad:local
-    build:
-      context: ../..
-      dockerfile: deploy/docker/Dockerfile
-    ports:
-      - "${PEAKCAD_PORT:-3000}:80"
-    restart: unless-stopped

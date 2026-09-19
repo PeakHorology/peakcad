@@ -23,7 +23,7 @@ npm run dev
 node scripts/sketchforge-mcp-server.mjs
 ```
 
-The MCP server talks to the app through `/api/sketchforge-mcp`. Open editor tabs heartbeat into that route and receive commands from it. Production and Docker/static builds intentionally return 404 for the MCP route.
+The MCP server talks to the app through `/api/sketchforge-mcp`. Open editor tabs heartbeat into that route and receive commands from it. The packaged desktop app and static export intentionally return 404 for the MCP route.
 
 ## Client Compatibility
 

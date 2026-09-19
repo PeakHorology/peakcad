@@ -1,7 +1,0 @@
-services:
-  peakcad:
-    # Override with PEAKCAD_IMAGE=ghcr.io/<owner>/<repo>:latest to match your GHCR push.
-    image: ${PEAKCAD_IMAGE:-ghcr.io/peakhorology/peakcad:latest}
-    ports:
-      - "${PEAKCAD_PORT:-3000}:80"
-    restart: unless-stopped

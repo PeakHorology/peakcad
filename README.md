@@ -1,16 +1,16 @@
 <div align="center">
   <img src="apps/web/public/assets/peakcad/peakcad-logo.png" width="120" alt="PeakCAD logo">
   <h1>PeakCAD</h1>
-  <p><strong>Local-first CAD</strong> — as approachable as Tinkercad, with real B-Rep STEP when it counts.</p>
+  <p><strong>Local CAD</strong> — as approachable as Tinkercad, with real B-Rep STEP when it counts.</p>
   <p>
     <a href="LICENSE"><img alt="GPLv3 license" src="https://img.shields.io/badge/license-GPLv3-blue"></a>
-    <img alt="Local first" src="https://img.shields.io/badge/local--first-no%20account-0ea5e9">
+    <img alt="Local only" src="https://img.shields.io/badge/local--only-no%20account-0ea5e9">
     <img alt="Beta" src="https://img.shields.io/badge/status-beta-f59e0b">
     <img alt="Version 0.9.11" src="https://img.shields.io/badge/version-0.9.11-2563eb">
   </p>
 </div>
 
-PeakCAD is desktop + browser CAD from **PeakHorologyLLC**. Projects stay on your machine. No login. No cloud lock-in.
+PeakCAD is a **Windows desktop** CAD app from **PeakHorologyLLC**. Projects stay on your machine. No login. No cloud. No LAN or hosted edition.
 
 ## What you can do
 
@@ -19,34 +19,24 @@ PeakCAD is desktop + browser CAD from **PeakHorologyLLC**. Projects stay on your
 - Sketch on a face, extrude / hole / revolve
 - Fillet and chamfer edges (re-apply after remesh — see [Beta limitations](docs/BETA-LIMITATIONS.md))
 - Import STL / STEP / 3MF / SVG · export STL / OBJ / 3MF / **STEP** (exact vs faceted, labeled)
-- Windows desktop app (`npm run package:desktop`)
 
-## Quick start
+## Run PeakCAD
+
+```bash
+npm install
+npm run package:desktop
+```
+
+Installers land in `dist-release/` (`PeakCAD-Setup-*.exe`, portable build). Use those — that is the product.
+
+### Build from source (developers)
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open [http://127.0.0.1:3000](http://127.0.0.1:3000). Leave the terminal running. See [GETTING-STARTED.md](GETTING-STARTED.md) for packaging and upgrades.
-
-### Desktop (Windows)
-
-```bash
-npm run package:desktop
-```
-
-Installers land in `dist-release/` (`PeakCAD-Setup-*.exe`, portable build).
-
-### Docker (optional LAN host)
-
-```bash
-npm run docker:up
-# → http://127.0.0.1:3000
-npm run docker:down
-```
-
-Projects still live in each browser’s storage — Docker only serves the app files.
+That starts a local preview on this computer only (`http://127.0.0.1:3000`). It is not a hosted or multi-user PeakCAD. See [GETTING-STARTED.md](GETTING-STARTED.md).
 
 ## Quality checks
 

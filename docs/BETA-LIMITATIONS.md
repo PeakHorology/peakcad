@@ -44,7 +44,7 @@ PeakCAD 0.9.x is **Beta**. Core modeling is ready for real parts; these are the 
 - Parallel, perpendicular, equal, tangent, and symmetry remain soft pulls in Beta.
 - Circles drawn as polylines have limited solve support versus first-class circle entities.
 
-## Local-first
+## Local only
 
-- No PeakCAD account, cloud sync, or multi-user vault in this release.
-- Projects live in browser / desktop local storage — export STEP/STL of anything you need to keep.
+- No PeakCAD account, cloud sync, hosted editor, or LAN/multi-user vault.
+- Projects live on this computer (desktop app storage). Export STEP/STL of anything you need to keep.
