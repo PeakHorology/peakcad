@@ -10,10 +10,11 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV STATIC_EXPORT=true
 
 COPY package.json package-lock.json ./
-RUN npm ci
+# postinstall copies OCCT/Manifold WASM; skip it until the full tree is in the image.
+RUN npm ci --ignore-scripts
 
 COPY . .
-RUN npm run build && npm run verify:static-worker-assets
+RUN npm run copy:occt && npm run build && npm run verify:static-worker-assets
 
 FROM nginx:stable-alpine AS runner
 
