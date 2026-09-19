@@ -119,20 +119,41 @@ describe("STEP export round-trip (real OCCT kernel)", () => {
     expect(near(await reimportVolume(blob), expected)).toBe(true);
   });
 
-  it("skips non-exact shapes with descriptive reasons but still exports the rest", async () => {
+  it("exports exact natives (incl. pyramid) and skips empty meshes with a reason", async () => {
     const box = shape({ kind: "box", name: "Box", width: 8, depth: 8, height: 8 });
     const pyramid = shape({ kind: "pyramid", name: "Pyramid", width: 8, depth: 8, height: 8 });
     const meshNoBrep = shape({ kind: "mesh", name: "RawMesh" });
 
-    const { exportedCount, skipped } = await exportShapesToStep([box, pyramid, meshNoBrep]);
-    expect(exportedCount).toBe(1);
-    expect(skipped.map((s) => s.kind).sort()).toEqual(["mesh", "pyramid"]);
-    expect(skipped.find((s) => s.kind === "pyramid")?.reason).toMatch(/no exact B-Rep mapping/i);
-    expect(skipped.find((s) => s.kind === "mesh")?.reason).toMatch(/no B-Rep source/i);
+    const { exportedCount, exactCount, facetedCount, skipped } = await exportShapesToStep([box, pyramid, meshNoBrep]);
+    expect(exportedCount).toBe(2);
+    expect(exactCount).toBe(2);
+    expect(facetedCount).toBe(0);
+    expect(skipped.map((s) => s.kind)).toEqual(["mesh"]);
+    expect(skipped[0]?.reason).toMatch(/no mesh available|no B-Rep|faceted/i);
   });
 
-  it("throws when there is nothing exact to export", async () => {
-    await expect(exportShapesToStep([shape({ kind: "pyramid", name: "Pyramid" })])).rejects.toThrow(/No box\/cylinder\/sphere/i);
+  it("throws when there is no solid geometry to export", async () => {
+    await expect(exportShapesToStep([shape({ kind: "mesh", name: "EmptyMesh" })])).rejects.toThrow(/No solid geometry/i);
+  });
+
+  it("exports an assemble Group as multi-solid STEP (not fused)", async () => {
+    const assembly = shape({
+      kind: "mesh",
+      name: "Assembly",
+      width: 30,
+      depth: 10,
+      height: 10,
+      csg: { op: "assemble", version: 1 },
+      groupedShapes: [
+        shape({ id: "left", kind: "box", name: "Left", x: -10, width: 10, depth: 10, height: 10 }),
+        shape({ id: "right", kind: "box", name: "Right", x: 10, width: 10, depth: 10, height: 10 }),
+      ],
+    });
+    const { blob, exportedCount, exactCount } = await exportShapesToStep([assembly]);
+    expect(exportedCount).toBe(2);
+    expect(exactCount).toBe(2);
+    // Two separate 10×10×10 boxes → volume 2000 (not a fused solid count of 1).
+    expect(near(await reimportVolume(blob), 2000)).toBe(true);
   });
 
   it("evaluates a live CSG union body to exact B-Rep STEP", async () => {

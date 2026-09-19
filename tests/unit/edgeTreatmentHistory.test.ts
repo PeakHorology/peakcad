@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { compactEdgeTreatmentHistory, edgeTreatmentAppliedFrame, restoreShapeBeforeEdgeTreatment } from "@/lib/edgeTreatmentHistory";
+import { compactEdgeTreatmentHistory, edgeTreatmentAppliedFrame, lastEditableEdgeTreatment, restoreShapeBeforeEdgeTreatment } from "@/lib/edgeTreatmentHistory";
 import type { EdgeTreatmentHistoryEntry, WorkplaneShape } from "@/types/sketchforge";
 
 function box(overrides: Partial<WorkplaneShape> = {}): WorkplaneShape {
@@ -160,5 +160,14 @@ describe("edge treatment history restoration", () => {
       height: 45,
       rotation: 35,
     });
+  });
+
+  it("edits only the newest fillet or chamfer of that tool", () => {
+    const fillet = { ...historyEntry(box()), id: "fillet-1", feature: { kind: "fillet" as const, amount: 2, edgeCount: 4 } };
+    const chamfer = { ...historyEntry(box()), id: "chamfer-1", feature: { kind: "chamfer" as const, amount: 1, edgeCount: 2 } };
+    const treated = box({ edgeTreatmentHistory: [fillet, chamfer] });
+    expect(lastEditableEdgeTreatment(treated, "chamfer")?.id).toBe("chamfer-1");
+    expect(lastEditableEdgeTreatment(treated, "fillet")).toBeNull();
+    expect(lastEditableEdgeTreatment(box({ edgeTreatmentHistory: [fillet] }), "fillet")?.id).toBe("fillet-1");
   });
 });

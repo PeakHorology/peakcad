@@ -81,6 +81,9 @@ function shapeFingerprintPayload(shape: WorkplaneShape): unknown {
     font: shape.font,
     locked: shape.locked || undefined,
     hidden: shape.hidden || undefined,
+    construction: shape.construction || undefined,
+    patternFeature: shape.patternFeature,
+    holeSpec: shape.holeSpec,
     csg: shape.csg,
     groupedBaseWidth: shape.groupedBaseWidth,
     groupedBaseDepth: shape.groupedBaseDepth,
@@ -159,12 +162,17 @@ export function compactHistoryShape(
 
   const op = next.csg?.op;
   if (next.csg && next.groupedShapes?.length && op && op !== "assemble" && next.importedMesh) {
-    // CSG mesh caches rebuild from children on undo, so positions need no vault. The baked STEP
-    // does not rebuild — and dropping it here left remeshDirtyHistoryShapes with no priorBrepStep
-    // to carry forward, so undoing an exact boolean silently downgraded it to faceted.
+    // Vault tessellation + baked STEP so undo can restore instantly. Remeshing every boolean
+    // body on undo/redo was the main source of multi-second history stalls.
     const mesh = next.importedMesh;
-    if (mesh.brepStep) {
-      vault[meshVaultKey(path)] = { positions: [], brepStep: mesh.brepStep };
+    const hasTessellation = mesh.positions.length >= 9;
+    if (hasTessellation || mesh.brepStep) {
+      vault[meshVaultKey(path)] = {
+        positions: mesh.positions,
+        ...(mesh.indices ? { indices: mesh.indices } : {}),
+        ...(mesh.normals ? { normals: mesh.normals } : {}),
+        ...(mesh.brepStep ? { brepStep: mesh.brepStep } : {}),
+      };
     }
     next = {
       ...next,
@@ -173,10 +181,11 @@ export function compactHistoryShape(
         baseWidth: mesh.baseWidth,
         baseDepth: mesh.baseDepth,
         baseHeight: mesh.baseHeight,
-        triangleCount: 0,
+        triangleCount: hasTessellation ? mesh.triangleCount : 0,
         sourceFormat: mesh.sourceFormat,
       },
-      csg: { ...next.csg, dirty: true },
+      // Keep a live dirty flag so an unevaluated boolean still remeshes on restore.
+      csg: { ...next.csg, dirty: hasTessellation ? Boolean(next.csg.dirty) : true },
     };
     return next;
   }
@@ -262,6 +271,13 @@ export function historyShapeNeedsRemesh(shape: WorkplaneShape): boolean {
   const op = shape.csg?.op;
   if (!shape.csg || !shape.groupedShapes?.length || !op || op === "assemble") return false;
   if (shape.csg.dirty) return true;
+  return !shape.importedMesh || shape.importedMesh.positions.length < 9;
+}
+
+/** Project-load heal only — a dirty flag with a usable mesh must not remesh (that snaps moved groups back). */
+export function historyShapeMissingTessellation(shape: WorkplaneShape): boolean {
+  const op = shape.csg?.op;
+  if (!shape.csg || !shape.groupedShapes?.length || !op || op === "assemble") return false;
   return !shape.importedMesh || shape.importedMesh.positions.length < 9;
 }
 

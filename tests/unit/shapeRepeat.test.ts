@@ -6,6 +6,7 @@ import {
   createDuplicateForRepeat,
   hasShapeRepeatDelta,
 } from "@/lib/shapeRepeat";
+import { MAX_SHAPE_SIDES } from "@/lib/workplaneShapes";
 
 function shape(overrides: Partial<WorkplaneShape> = {}): WorkplaneShape {
   return {
@@ -44,6 +45,33 @@ function bakedThinRectangle(overrides: Partial<WorkplaneShape> = {}): WorkplaneS
       sourceFormat: "json",
     },
     ...overrides,
+  });
+}
+
+/** 200 x 200 plate, 2mm thick: its 45-degree diagonal (282.8mm) exceeds the 220mm clamp. */
+function largePlate(): WorkplaneShape {
+  return shape({
+    kind: "mesh",
+    width: 200,
+    depth: 200,
+    height: 2,
+    size: 200,
+    rotation: 0,
+    rotationX: 0,
+    rotationZ: 0,
+    importedMesh: {
+      positions: [
+        -100, 0, -100, 100, 0, -100, 100, 0, 100,
+        -100, 0, -100, 100, 0, 100, -100, 0, 100,
+        -100, 2, -100, 100, 2, -100, 100, 2, 100,
+        -100, 2, -100, 100, 2, 100, -100, 2, 100,
+      ],
+      baseWidth: 200,
+      baseDepth: 200,
+      baseHeight: 2,
+      triangleCount: 4,
+      sourceFormat: "json",
+    },
   });
 }
 
@@ -90,5 +118,40 @@ describe("shapeRepeat", () => {
     expect(repeated.id).toBe("mesh-1-repeat");
     expect(repeated.rotation).toBe(0);
     expect(repeated.importedMesh?.positions).not.toEqual(baked.importedMesh?.positions);
+  });
+
+  it("keeps a rotated import's declared size equal to its real mesh extent", () => {
+    const repeated = applyRepeatActionToDuplicate(
+      createDuplicateForRepeat(largePlate(), "plate-repeat"),
+      { rotation: 45 },
+      { incremental: true },
+    );
+
+    const diagonal = Math.SQRT2 * 200;
+    expect(repeated.width).toBeCloseTo(diagonal, 3);
+    expect(repeated.depth).toBeCloseTo(diagonal, 3);
+
+    // Geometry renders through width/baseWidth. Clamping only the declared side to 220mm
+    // rescaled the whole mesh, shipping the part 22% undersized with no warning.
+    expect(repeated.width).toBeCloseTo(repeated.importedMesh!.baseWidth!, 6);
+    expect(repeated.depth).toBeCloseTo(repeated.importedMesh!.baseDepth!, 6);
+  });
+
+  it("clamps repeated facet counts as integers rather than as millimetres", () => {
+    const shrunk = applyRepeatActionToDuplicate(
+      createDuplicateForRepeat(shape({ kind: "cylinder", sides: 8 }), "cyl-a"),
+      { sides: -20 },
+      { incremental: true },
+    );
+    // The millimetre clamp bottomed out at 0.01, which is not a facet count.
+    expect(shrunk.sides).toBe(3);
+
+    const grown = applyRepeatActionToDuplicate(
+      createDuplicateForRepeat(shape({ kind: "cylinder", sides: 200 }), "cyl-b"),
+      { sides: 40 },
+      { incremental: true },
+    );
+    expect(grown.sides).toBe(Math.min(MAX_SHAPE_SIDES, 240));
+    expect(Number.isInteger(grown.sides)).toBe(true);
   });
 });

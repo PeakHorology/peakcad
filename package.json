@@ -1,6 +1,6 @@
 {
   "name": "peakcad",
-  "version": "0.9.7",
+  "version": "0.9.11",
   "private": true,
   "license": "GPL-3.0-or-later",
   "author": "PeakHorologyLLC",
@@ -8,12 +8,14 @@
   "homepage": "https://peakhorology.com",
   "main": "electron/main.cjs",
   "scripts": {
+    "postinstall": "node scripts/copy-occt-wasm.mjs",
     "copy:occt": "node scripts/copy-occt-wasm.mjs",
     "predev": "npm run copy:occt",
     "dev": "next dev apps/web",
     "prebuild": "npm run copy:occt",
     "build": "next build apps/web",
-    "export": "set STATIC_EXPORT=true&& next build apps/web && node scripts/verify-static-worker-assets.mjs",
+    "preexport": "npm run copy:occt",
+    "export": "node scripts/static-export.mjs",
     "verify:static-worker-assets": "node scripts/verify-static-worker-assets.mjs",
     "start": "next start apps/web",
     "typecheck": "tsc -p apps/web/tsconfig.json --noEmit",
@@ -21,11 +23,12 @@
     "test:watch": "vitest --config tests/vitest.config.ts",
     "test:e2e": "vitest run --config tests/vitest.e2e.config.ts",
     "perf": "vitest run --config tests/vitest.perf.config.ts --reporter verbose",
-    "ci": "npm run typecheck && npm run test",
-    "docker:build": "docker build -f deploy/docker/Dockerfile -t sketchforge:local .",
-    "docker:run": "docker run --rm -p 3000:80 sketchforge:local",
+    "ci": "npm run typecheck && npm run test && npm run test:e2e",
+    "docker:build": "docker build -f deploy/docker/Dockerfile -t peakcad:local .",
+    "docker:run": "docker run --rm -p 3000:80 peakcad:local",
     "docker:up": "docker compose -f deploy/docker/compose.yaml up --build -d",
     "docker:down": "docker compose -f deploy/docker/compose.yaml down",
+    "mcp:peakcad": "node scripts/sketchforge-mcp-server.mjs",
     "mcp:sketchforge": "node scripts/sketchforge-mcp-server.mjs",
     "electron:start": "electron .",
     "prepackage:desktop": "npm run export && node scripts/prepare-desktop-icon.mjs",
@@ -84,6 +87,15 @@
       {
         "from": "electron/icon.ico",
         "to": "app-icon.ico"
+      }
+    ],
+    "fileAssociations": [
+      {
+        "ext": "peakcad",
+        "name": "PeakCAD Project",
+        "description": "PeakCAD project file",
+        "icon": "build/icon.ico",
+        "role": "Editor"
       }
     ],
     "win": {

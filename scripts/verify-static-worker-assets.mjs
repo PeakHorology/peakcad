@@ -29,8 +29,15 @@ if (indexHtml.includes('="./_next/')) {
 const workerChunks = [];
 for (const path of await listJavaScriptFiles(chunksRoot)) {
   const source = await readFile(path, "utf8");
-  if (source.includes("importScripts(") && source.includes("static/chunks/")) {
-    workerChunks.push({ path, source });
+  // Classic webpack worker runtime (older Next builds).
+  const classicWorker = source.includes("importScripts(") && source.includes("static/chunks/");
+  // Modern module workers: CAD/manifold runtimes with message handlers and no classic importScripts.
+  const modernCadWorker =
+    !source.includes("importScripts(")
+    && (source.includes("onmessage") || source.includes("addEventListener(\"message\""))
+    && (source.includes("/occt") || source.includes("cadModifier") || source.includes("manifold"));
+  if (classicWorker || modernCadWorker) {
+    workerChunks.push({ path, source, classicWorker });
   }
 }
 
@@ -38,10 +45,13 @@ if (workerChunks.length === 0) {
   throw new Error("Could not find the generated CAD worker runtime to verify its public path.");
 }
 
-for (const { path, source } of workerChunks) {
-  if (!source.includes('.p="/_next/"') && !source.includes(".p='/_next/'")) {
+for (const { path, source, classicWorker } of workerChunks) {
+  if (/["']\.\/_next\//.test(source)) {
+    throw new Error(`Worker runtime ${path} embeds a relative ./_next/ asset path.`);
+  }
+  if (classicWorker && !source.includes('.p="/_next/"') && !source.includes(".p='/_next/'")) {
     throw new Error(`Worker runtime ${path} does not use the root-relative /_next/ public path.`);
   }
 }
 
-console.log(`Verified ${workerChunks.length} static worker runtime(s) use /_next/.`);
+console.log(`Verified ${workerChunks.length} static worker runtime(s) for Electron/static export.`);

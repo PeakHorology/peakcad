@@ -1,7 +1,8 @@
-const { app, BrowserWindow, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, Menu, nativeImage, shell } = require("electron");
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
+const { allowPath, findPeakcadArg, registerProjectFileIpc } = require("./projectFile.cjs");
 
 const HOST = "127.0.0.1";
 const APP_PORT = 48173;
@@ -39,6 +40,41 @@ app.setName("PeakCAD");
 
 let server = null;
 let mainWindow = null;
+function grantOpenPath(filePath) {
+  if (!filePath) return null;
+  try {
+    return allowPath(filePath);
+  } catch {
+    return filePath;
+  }
+}
+
+let pendingOpenPath = grantOpenPath(findPeakcadArg(process.argv));
+
+function installFileMenu() {
+  const sendMenu = (action) => {
+    mainWindow?.webContents.send("peakcad:menu", action);
+  };
+  Menu.setApplicationMenu(
+    Menu.buildFromTemplate([
+      {
+        label: "File",
+        submenu: [
+          { label: "New design", accelerator: "CmdOrCtrl+N", click: () => sendMenu("new") },
+          { label: "Open…", accelerator: "CmdOrCtrl+O", click: () => sendMenu("open") },
+          { type: "separator" },
+          { label: "Save", accelerator: "CmdOrCtrl+S", click: () => sendMenu("save") },
+          { label: "Save As…", accelerator: "CmdOrCtrl+Shift+S", click: () => sendMenu("save-as") },
+          { type: "separator" },
+          { role: "quit" },
+        ],
+      },
+      { role: "editMenu" },
+      { role: "viewMenu" },
+      { role: "windowMenu" },
+    ]),
+  );
+}
 
 function staticRoot() {
   return path.join(app.getAppPath(), "apps", "web", ".next-export");
@@ -49,13 +85,13 @@ function contentType(filePath) {
 }
 
 function resolveRequestPath(urlPath) {
-  const root = staticRoot();
+  const root = path.resolve(staticRoot());
   const decoded = decodeURIComponent(urlPath.split("?")[0]);
   const normalized = path.normalize(decoded).replace(/^(\.\.[/\\])+/, "");
-  const relative = normalized.startsWith("/") ? normalized.slice(1) : normalized;
-  const candidate = path.join(root, relative);
-
-  if (!candidate.startsWith(root)) {
+  const relative = normalized.replace(/^[/\\]+/, "");
+  const candidate = path.resolve(root, relative);
+  const rootPrefix = root.endsWith(path.sep) ? root : `${root}${path.sep}`;
+  if (candidate !== root && !candidate.startsWith(rootPrefix)) {
     return null;
   }
 
@@ -164,6 +200,25 @@ function appIconImage() {
   return image.isEmpty() ? undefined : image;
 }
 
+/** Schemes it is reasonable to hand to the operating system from page content. */
+const EXTERNALLY_OPENABLE_PROTOCOLS = new Set(["https:", "http:", "mailto:"]);
+
+function isExternallyOpenable(url) {
+  try {
+    return EXTERNALLY_OPENABLE_PROTOCOLS.has(new URL(url).protocol);
+  } catch {
+    return false;
+  }
+}
+
+function isAppUrl(url, appOrigin) {
+  try {
+    return new URL(url).origin === appOrigin;
+  } catch {
+    return false;
+  }
+}
+
 function createWindow(port) {
   const iconPath = appIconPath();
   const icon = appIconImage();
@@ -174,9 +229,10 @@ function createWindow(port) {
     minHeight: 700,
     title: "PeakCAD",
     icon: iconPath ?? icon,
-    autoHideMenuBar: true,
+    autoHideMenuBar: false,
     backgroundThrottling: false,
     webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
@@ -188,7 +244,10 @@ function createWindow(port) {
   });
 
   mainWindow.webContents.on("did-finish-load", () => {
-    void mainWindow?.webContents.executeJavaScript("window.peakcadDesktop = true;");
+    if (pendingOpenPath && mainWindow) {
+      mainWindow.webContents.send("peakcad:open-path", pendingOpenPath);
+      pendingOpenPath = null;
+    }
   });
 
   if (icon) {
@@ -213,11 +272,37 @@ function createWindow(port) {
     }
   }
 
-  mainWindow.loadURL(`http://${HOST}:${port}/`);
+  const appOrigin = `http://${HOST}:${port}`;
+  // The marker is readable by the first script that runs; the injected window.peakcadDesktop flag
+  // below only lands after load, which is too late for hardware profiling done at module init.
+  mainWindow.loadURL(`${appOrigin}/?shell=desktop`);
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    // Hand the OS only the schemes a browser would follow. shell.openExternal on an arbitrary
+    // scheme (file:, smb:, or any registered custom handler) can launch a local program, and the
+    // URL here comes from page content such as an imported SVG.
+    if (isExternallyOpenable(url)) {
+      void shell.openExternal(url);
+    }
     return { action: "deny" };
+  });
+
+  // Keep the window on the local app. Without this the page could navigate the whole window to
+  // remote content, which would then be running inside the app's own session partition.
+  const blockOffAppNavigation = (event, url) => {
+    if (isAppUrl(url, appOrigin)) return;
+    event.preventDefault();
+    if (isExternallyOpenable(url)) {
+      void shell.openExternal(url);
+    }
+  };
+  mainWindow.webContents.on("will-navigate", blockOffAppNavigation);
+  mainWindow.webContents.on("will-frame-navigate", (event) => {
+    blockOffAppNavigation(event, event.url);
+  });
+  mainWindow.webContents.on("will-attach-webview", (event) => {
+    // Nothing in PeakCAD embeds a webview; one appearing is not something to render.
+    event.preventDefault();
   });
 
   mainWindow.on("closed", () => {
@@ -239,10 +324,16 @@ const gotSingleInstanceLock = app.requestSingleInstanceLock();
 if (!gotSingleInstanceLock) {
   app.exit(0);
 } else {
-  app.on("second-instance", () => {
+  app.on("second-instance", (_event, argv) => {
+    const opened = findPeakcadArg(argv);
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
+      if (opened) {
+        mainWindow.webContents.send("peakcad:open-path", grantOpenPath(opened));
+      }
+    } else if (opened) {
+      pendingOpenPath = grantOpenPath(opened);
     }
   });
 
@@ -250,6 +341,8 @@ if (!gotSingleInstanceLock) {
     if (process.platform === "win32") {
       app.setAppUserModelId(APP_USER_MODEL_ID);
     }
+    registerProjectFileIpc(app, () => mainWindow);
+    installFileMenu();
     return bootstrap();
   }).catch((error) => {
     console.error(error);

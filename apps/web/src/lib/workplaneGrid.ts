@@ -19,17 +19,17 @@ export type WorkplaneGridPalette = {
 export function workplaneGridPalette(theme: UiTheme = readAppliedUiTheme()): WorkplaneGridPalette {
   if (theme === "dark") {
     return {
-      minor: { color: "#3d7a8a", opacity: 0.5 },
-      major: { color: "#5eb8e8", opacity: 0.62 },
-      axis: { color: "#7ec8e8", opacity: 0.85 },
-      border: { color: "#6bb8d8", opacity: 0.88 },
+      minor: { color: "#3d7a8a", opacity: 0.36 },
+      major: { color: "#5eb8e8", opacity: 0.46 },
+      axis: { color: "#7ec8e8", opacity: 0.68 },
+      border: { color: "#6bb8d8", opacity: 0.7 },
     };
   }
   return {
-    minor: { color: "#91dff0", opacity: 0.55 },
-    major: { color: "#4bbddf", opacity: 0.7 },
-    axis: { color: "#34aad2", opacity: 0.88 },
-    border: { color: "#58c5e6", opacity: 0.9 },
+    minor: { color: "#91dff0", opacity: 0.38 },
+    major: { color: "#4bbddf", opacity: 0.5 },
+    axis: { color: "#34aad2", opacity: 0.68 },
+    border: { color: "#58c5e6", opacity: 0.7 },
   };
 }
 

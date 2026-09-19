@@ -50,6 +50,16 @@ export function compactEdgeTreatmentHistory(history: EdgeTreatmentHistoryEntry[]
   }));
 }
 
+/** Last applied fillet/chamfer of this kind, when it is the newest feature. */
+export function lastEditableEdgeTreatment(
+  shape: WorkplaneShape,
+  kind: "fillet" | "chamfer",
+): EdgeTreatmentHistoryEntry | null {
+  const history = shape.edgeTreatmentHistory ?? [];
+  const last = history[history.length - 1];
+  return last?.feature.kind === kind ? last : null;
+}
+
 export function restoreShapeBeforeEdgeTreatment(shape: WorkplaneShape, entry: EdgeTreatmentHistoryEntry) {
   const before = cloneWorkplaneShapeSnapshot(entry.before);
   const entryIndex = (shape.edgeTreatmentHistory ?? []).findIndex((candidate) => candidate.id === entry.id);

@@ -88,8 +88,9 @@ export function TransformOverlay({
   onEditingRotationChange,
   onCommitRotationEdit,
   onCancelRotationEdit,
+  onCycleStackedSelection,
 }: TransformOverlayProps) {
-  const marks = measureKey ? (box.dimensions[measureKey] ?? []) : [];
+  const marks = measureKey ? (box.dimensions[measureKey] ?? []) : (box.dimensions.selection ?? []);
   const visibleMarks = (hideDimensionMarks ? [] : marks).filter((mark) => mark.key !== editingDimension?.key);
   const handleMeasureKey = (handle: TransformOverlayState["handles"][number]) => measureKeyForHandle(handle.kind, handle.key, box);
   // Indexed ticks live in the inner circle; the outer band is the free-rotation ring.
@@ -124,7 +125,14 @@ export function TransformOverlay({
           className={`rotation-protractor-plane axis-${rotationWheelAxis} snap-${snapMode}`}
           viewBox={`0 0 ${box.width} ${box.height}`}
           preserveAspectRatio="none"
-          onPointerDown={(event) => onBeginTransform("rotate", `rotate-wheel-${rotationWheelAxis}`, event)}
+          onPointerDown={(event) => {
+            if (onCycleStackedSelection?.(event.clientX, event.clientY)) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+            onBeginTransform("rotate", `rotate-wheel-${rotationWheelAxis}`, event);
+          }}
           onPointerMove={(event) => onMoveTransform(event.clientX, event.clientY, event.shiftKey, event.altKey)}
           onPointerUp={onFinishTransform}
           onPointerCancel={onFinishTransform}
@@ -179,8 +187,20 @@ export function TransformOverlay({
           className="dimension-label"
           type="button"
           style={{ "--overlay-x": `${mark.labelX}px`, "--overlay-y": `${mark.labelY}px` } as CSSProperties}
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={() => onBeginDimensionEdit(mark)}
+          onPointerDown={(event) => {
+            if (onCycleStackedSelection?.(event.clientX, event.clientY)) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+            event.stopPropagation();
+          }}
+          onClick={(event) => {
+            if (event.detail >= 2) {
+              return;
+            }
+            onBeginDimensionEdit(mark);
+          }}
         >
           {mark.label}
         </button>
@@ -246,6 +266,11 @@ export function TransformOverlay({
           onPointerEnter={() => onHoverMeasure(handle.kind === "lift" ? null : handleMeasureKey(handle))}
           onPointerLeave={() => onHoverMeasure(null)}
           onPointerDown={(event) => {
+            if (handle.kind !== "lift" && onCycleStackedSelection?.(event.clientX, event.clientY)) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
             onPinMeasure(handleMeasureKey(handle));
             onBeginTransform(handle.kind, handle.key, event);
           }}
@@ -286,12 +311,22 @@ export function TransformOverlay({
             // Both handles follow the projected world tangent so icons stay model-parallel (not screen-billboarded).
             "--rotate-handle-angle": `${handle.angle}deg`,
           } as CSSProperties}
-          onPointerDown={(event) => onBeginTransform("rotate", handle.key, event)}
+          onPointerDown={(event) => {
+            if (onCycleStackedSelection?.(event.clientX, event.clientY)) {
+              event.preventDefault();
+              event.stopPropagation();
+              return;
+            }
+            onBeginTransform("rotate", handle.key, event);
+          }}
           onPointerMove={(event) => onMoveTransform(event.clientX, event.clientY, event.shiftKey, event.altKey)}
           onPointerUp={onFinishTransform}
           onPointerCancel={onFinishTransform}
           onClick={(event) => {
             event.stopPropagation();
+            if (event.detail >= 2) {
+              return;
+            }
             onBeginRotationEdit(handle.key, handle.x + 34, handle.y - 28);
           }}
         >

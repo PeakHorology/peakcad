@@ -141,3 +141,16 @@ export function selectionSupportsOcctCsg(shapes: WorkplaneShape[]): boolean {
   if (!hasSolid) return false;
   return active.every((shape) => shapeHasExactBrepSource(shape));
 }
+
+export const OCCT_MESH_FALLBACK_NOTICE =
+  "Exact CAD boolean unavailable — used mesh Group. STEP for this solid may be faceted.";
+
+/** Shown when Group/remesh was OCCT-eligible but the result is only a mesh. */
+export function occtMeshFallbackNotice(options: {
+  skipOcct?: boolean;
+  occtEligible: boolean;
+  resultHasExactBrep: boolean;
+}): string | undefined {
+  if (options.skipOcct || !options.occtEligible || options.resultHasExactBrep) return undefined;
+  return OCCT_MESH_FALLBACK_NOTICE;
+}

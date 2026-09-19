@@ -11,6 +11,8 @@ import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const src = join(root, "node_modules", "occt-wasm", "dist");
 const dest = join(root, "apps", "web", "public", "occt");
+const manifoldSrc = join(root, "node_modules", "manifold-3d");
+const publicDir = join(root, "apps", "web", "public");
 
 if (!existsSync(src)) {
   console.error(`[copy-occt-wasm] occt-wasm not installed at ${src}. Run \`npm install\` first.`);
@@ -24,3 +26,14 @@ const wanted = entries.filter((name) => name.endsWith(".js") || name.endsWith(".
 await Promise.all(wanted.map((name) => cp(join(src, name), join(dest, name))));
 
 console.log(`[copy-occt-wasm] staged ${wanted.length} files into apps/web/public/occt/`);
+
+if (!existsSync(join(manifoldSrc, "manifold.wasm")) || !existsSync(join(manifoldSrc, "manifold.js"))) {
+  console.error(`[copy-occt-wasm] manifold-3d not installed at ${manifoldSrc}. Run \`npm install\` first.`);
+  process.exit(1);
+}
+
+await mkdir(publicDir, { recursive: true });
+await cp(join(manifoldSrc, "manifold.js"), join(publicDir, "manifold.js"));
+await cp(join(manifoldSrc, "manifold.wasm"), join(publicDir, "manifold.wasm"));
+console.log("[copy-occt-wasm] staged manifold.js and manifold.wasm into apps/web/public/");
+

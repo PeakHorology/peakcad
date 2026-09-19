@@ -5,6 +5,7 @@ import {
   compactHistoryShape,
   editorHistoryEntry,
   expandHistoryShapes,
+  historyShapeMissingTessellation,
   historyShapeNeedsRemesh,
   hydrateEditorHistoryState,
   MAX_EDITOR_HISTORY_BYTES,
@@ -34,6 +35,73 @@ function box(overrides: Partial<WorkplaneShape> = {}): WorkplaneShape {
 }
 
 describe("editor history snapshots", () => {
+  it("keeps a CSG body's baked STEP and tessellation across an undo round trip", () => {
+    const body = box({
+      kind: "mesh",
+      csg: { op: "subtract", version: 1 },
+      groupedShapes: [box({ id: "a" }), box({ id: "b", hole: true })],
+      importedMesh: {
+        positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],
+        baseWidth: 20,
+        baseDepth: 20,
+        baseHeight: 20,
+        triangleCount: 1,
+        sourceFormat: "json",
+        brepStep: "ISO-10303-21; exact solid",
+      },
+    });
+
+    const vault = {};
+    const compact = compactHistoryShape(body, vault, body.id);
+    // The heavy mesh stays out of the cloned shape payload.
+    expect(compact.importedMesh?.positions).toEqual([]);
+
+    const [restored] = expandHistoryShapes([compact], vault);
+    expect(restored.importedMesh?.brepStep).toBe("ISO-10303-21; exact solid");
+    expect(restored.importedMesh?.positions).toEqual(body.importedMesh?.positions);
+    expect(historyShapeNeedsRemesh(restored)).toBe(false);
+  });
+
+  it("does not treat a dirty CSG body with a mesh as missing tessellation", () => {
+    const body = box({
+      kind: "mesh",
+      csg: { op: "subtract", version: 1, dirty: true },
+      groupedShapes: [box({ id: "a" }), box({ id: "b", hole: true })],
+      importedMesh: {
+        positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],
+        baseWidth: 20,
+        baseDepth: 20,
+        baseHeight: 20,
+        triangleCount: 1,
+        sourceFormat: "json",
+      },
+    });
+    expect(historyShapeNeedsRemesh(body)).toBe(true);
+    expect(historyShapeMissingTessellation(body)).toBe(false);
+  });
+
+  it("vaults a CSG tessellation even when the body has no baked STEP", () => {
+    const vault: Record<string, unknown> = {};
+    compactHistoryShape(
+      box({
+        kind: "mesh",
+        csg: { op: "union", version: 1 },
+        groupedShapes: [box({ id: "a" }), box({ id: "b" })],
+        importedMesh: {
+          positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],
+          baseWidth: 20,
+          baseDepth: 20,
+          baseHeight: 20,
+          triangleCount: 1,
+          sourceFormat: "json",
+        },
+      }),
+      vault as never,
+      "body",
+    );
+    expect((vault.body as { positions: number[] } | undefined)?.positions).toHaveLength(9);
+  });
+
   it("seeds history with the real loaded scene and valid selection", () => {
     const shape = box();
     const entry = editorHistoryEntry([shape], [shape.id, "missing", shape.id]);
@@ -136,11 +204,15 @@ describe("editor history snapshots", () => {
       },
     });
 
-    const compacted = compactHistoryShape(group);
+    const vault = {};
+    const compacted = compactHistoryShape(group, vault);
     expect(compacted.importedMesh?.positions).toEqual([]);
-    expect(compacted.importedMesh?.triangleCount).toBe(0);
-    expect(compacted.csg?.dirty).toBe(true);
+    expect(compacted.importedMesh?.triangleCount).toBe(2);
+    expect(compacted.csg?.dirty).toBe(false);
     expect(historyShapeNeedsRemesh(compacted)).toBe(true);
+    const [restored] = expandHistoryShapes([compacted], vault);
+    expect(historyShapeNeedsRemesh(restored)).toBe(false);
+    expect(restored.importedMesh?.positions.length).toBeGreaterThan(8);
     expect(group.importedMesh?.positions.length).toBeGreaterThan(8);
     expect(compacted.groupedShapes?.[0].id).toBe("child-a");
   });

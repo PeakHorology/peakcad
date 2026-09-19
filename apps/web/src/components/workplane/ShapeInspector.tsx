@@ -25,6 +25,8 @@ import { METRIC_COARSE_THREADS, type MetricThreadDesignation } from "@/lib/metri
 import { resolveShapeSides, resolveShapeSteps } from "@/lib/displayTessellation";
 import { fallbackSolidColor, MAX_SHAPE_SIDES, resizedShapeSize, shapeDepth, shapeWidth, coneBaseRadius, conePatchForFootprint, conePatchForRadii, coneTopRadius } from "@/lib/workplaneShapes";
 import { inferCsgOp, isEvaluatedCsgBody } from "@/lib/csgTree";
+import { isConstructionShape } from "@/lib/holeFeature";
+import { patternFeatureLabel } from "@/lib/patternFeature";
 import {
   shapeExportQualityHint,
   shapeExportQualityHintInScene,
@@ -442,6 +444,8 @@ export function ShapeInspector({
   onReorderFeature,
   onUpdateFeature,
   sceneShapes,
+  onEditPattern,
+  onDissolvePattern,
 }: {
   shape: WorkplaneShape;
   workspace: WorkplaneWorkspaceSettings;
@@ -461,6 +465,8 @@ export function ShapeInspector({
   onUpdateFeature?: (featureId: string, patch: Partial<WorkplaneShape>, options?: ShapeInspectorUpdateOptions) => void;
   /** Whole scene, so the export badge can account for loose cutters that will reach this body. */
   sceneShapes?: readonly WorkplaneShape[];
+  onEditPattern?: () => void;
+  onDissolvePattern?: () => void;
 }) {
   const feature =
     activeFeatureId
@@ -485,6 +491,9 @@ export function ShapeInspector({
   const csgChildren = shape.groupedShapes ?? [];
   const csgOp = shape.csg?.op ?? inferCsgOp(shape);
   const showFeatureTree = Boolean(csgChildren.length && (isEvaluatedCsgBody(shape) || csgOp));
+  const pattern = shape.patternFeature;
+  const holeSpec = shape.holeSpec ?? inspectTarget.holeSpec;
+  const showShallowFeatures = Boolean(pattern || (shape.edgeTreatments?.length ?? 0) > 0 || holeSpec || shape.construction);
   const [propertiesOpen, setPropertiesOpen] = useState(true);
   const [colorOpen, setColorOpen] = useState(false);
   const [featuresOpen, setFeaturesOpen] = useState(true);
@@ -492,7 +501,8 @@ export function ShapeInspector({
   const [draftColor, setDraftColor] = useState(solidColor);
   const colorPickingRef = useRef(false);
 
-  useEffect(() => () => onInteractionActiveChange?.(false), [onInteractionActiveChange]);
+  // Do not call onInteractionActiveChange(false) on unmount — switching selection
+  // while a viewport drag is starting would cancel the drag and rehydrate the project.
 
   useEffect(() => {
     if (!colorPickingRef.current) {
@@ -667,7 +677,7 @@ export function ShapeInspector({
           <div className="property-list" id={`properties-${shape.id}`}>
             {properties.map((property) => {
               if (property.type === "text") {
-                return <TextProperty key={property.label} {...property} disabled={locked} onInteractionActiveChange={onInteractionActiveChange} />;
+                return <TextProperty key={property.label} {...property} disabled={locked} />;
               }
               if (property.type === "select") {
                 return <SelectProperty key={property.label} {...property} disabled={locked} />;
@@ -677,6 +687,62 @@ export function ShapeInspector({
           </div>
         ) : null}
       </div>
+
+      {showShallowFeatures ? (
+        <div className="property-card csg-feature-tree" aria-label="Features">
+          <button
+            className="property-card-header"
+            type="button"
+            aria-expanded={featuresOpen}
+            aria-controls={`cad-features-${shape.id}`}
+            onClick={() => setFeaturesOpen((open) => !open)}
+          >
+            <span>Features</span>
+            <ChevronUp className={featuresOpen ? "" : "collapsed"} size={25} strokeWidth={2.8} />
+          </button>
+          {featuresOpen ? (
+            <div className="csg-feature-list" id={`cad-features-${shape.id}`}>
+              <div className="csg-feature-row">
+                <span className="csg-feature-name">{isConstructionShape(shape) ? "Construction plane" : inspectTarget.kind}</span>
+              </div>
+              {(shape.edgeTreatments ?? []).map((feature, index) => (
+                <div key={`edge-${index}`} className="csg-feature-row">
+                  <span className="csg-feature-name">
+                    {feature.kind === "fillet" ? "Fillet" : "Chamfer"} {feature.amount} mm
+                    {feature.edgeCount ? ` · ${feature.edgeCount} edges` : ""}
+                  </span>
+                </div>
+              ))}
+              {holeSpec ? (
+                <div className="csg-feature-row">
+                  <span className="csg-feature-name">
+                    Hole ⌀{holeSpec.diameter}
+                    {holeSpec.depthMode === "through" ? " through" : ` × ${holeSpec.depth}`}
+                    {holeSpec.style === "counterbore" ? " · C’bore" : holeSpec.style === "countersink" ? " · C’sink" : ""}
+                  </span>
+                </div>
+              ) : null}
+              {pattern ? (
+                <div className="csg-feature-row active">
+                  <span className="csg-feature-name">{patternFeatureLabel(pattern)}</span>
+                  <div className="csg-feature-reorder">
+                    {onEditPattern ? (
+                      <button type="button" disabled={locked} onClick={onEditPattern}>
+                        Edit
+                      </button>
+                    ) : null}
+                    {onDissolvePattern ? (
+                      <button type="button" disabled={locked} onClick={onDissolvePattern}>
+                        Dissolve
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
 
       {showFeatureTree ? (
         <div className="property-card csg-feature-tree" aria-label="Model tree">
@@ -891,7 +957,6 @@ function RangeProperty({
     const nextModelValue = toModelValue(finiteNext);
     onChange(allowsAboveSliderMax ? Math.max(min, nextModelValue) : clamp(nextModelValue, min, max));
     setEditing(false);
-    onInteractionActiveChange?.(false);
   };
   const handleSliderChange = (nextValue: number) => {
     const next = clamp(Number.isFinite(nextValue) ? nextValue : controlMin, controlMin, controlMax);
@@ -912,7 +977,6 @@ function RangeProperty({
             disabled={disabled}
             inputMode="decimal"
             onFocus={() => {
-              onInteractionActiveChange?.(true);
               setDraft(formatPropertyNumber(controlValue, accuracy, controlStep));
               setEditing(true);
             }}
@@ -939,8 +1003,6 @@ function RangeProperty({
           step={controlStep}
           value={sliderValue}
           disabled={disabled}
-          onFocus={() => onInteractionActiveChange?.(true)}
-          onBlur={() => onInteractionActiveChange?.(false)}
           onPointerDown={() => onInteractionActiveChange?.(true)}
           onPointerUp={() => onInteractionActiveChange?.(false)}
           onPointerCancel={() => onInteractionActiveChange?.(false)}
@@ -957,8 +1019,7 @@ function TextProperty({
   maxLength = 24,
   disabled,
   onChange,
-  onInteractionActiveChange,
-}: TextPropertyConfig & { disabled?: boolean; onInteractionActiveChange?: (active: boolean) => void }) {
+}: TextPropertyConfig & { disabled?: boolean }) {
   const [draft, setDraft] = useState(value);
 
   useEffect(() => {
@@ -974,9 +1035,7 @@ function TextProperty({
         disabled={disabled}
         maxLength={maxLength}
         spellCheck={false}
-        onFocus={() => onInteractionActiveChange?.(true)}
         onBlur={() => {
-          onInteractionActiveChange?.(false);
           const committed = draft.replace(/\s+/g, " ").trim();
           if (!committed) {
             const fallback = value.trim() || (label === "Name" ? "Shape" : draft);

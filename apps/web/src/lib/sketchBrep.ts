@@ -3,6 +3,7 @@ import { loadBrepWithOcct, type Brep, type BrepSolid } from "@/lib/brepKernel";
 import { faceHoleOvershootMm } from "@/lib/csgTree";
 import { resolveSketchPlane, sketchPlaneVAxis } from "@/lib/sketchPlane";
 import { isCylinderSketchPlane } from "@/lib/sketchCylinder";
+import { shapeHasExactBrepSource } from "@/lib/stepQuality";
 
 export type SketchBrepBakeResult = {
   brepStep: string;
@@ -152,6 +153,34 @@ export function withBakedSketchBrepStep(shape: WorkplaneShape, brepStep: string)
       brepStep,
     },
   };
+}
+
+/** Sketch meshes that remesh/Group must bake before OCCT can run an exact boolean. */
+export function sketchOperandsNeedingExactBake(shapes: readonly WorkplaneShape[]): WorkplaneShape[] {
+  return shapes.filter((shape) => (
+    !shapeHasExactBrepSource(shape)
+    && Boolean(shape.sketchProfile)
+    && Boolean(shape.importedMesh)
+  ));
+}
+
+/**
+ * Attach exact STEP on bakeable sketch meshes before Group/remesh so OCCT is eligible
+ * instead of racing an async bake and falling to mesh CSG.
+ */
+export async function ensureExactBrepSources(
+  shapes: WorkplaneShape[],
+  bakeSketchBrepStep: (shape: WorkplaneShape) => Promise<string | null>,
+): Promise<WorkplaneShape[]> {
+  return Promise.all(shapes.map(async (shape) => {
+    if (!sketchOperandsNeedingExactBake([shape]).length) return shape;
+    try {
+      const brepStep = await bakeSketchBrepStep(shape);
+      return brepStep ? withBakedSketchBrepStep(shape, brepStep) : shape;
+    } catch {
+      return shape;
+    }
+  }));
 }
 
 /**

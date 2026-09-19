@@ -118,6 +118,60 @@ export function conePatchForFootprint(
   };
 }
 
+/**
+ * Shift-drag uniform scale for a triangle. Height follows the width scale so
+ * the stored base angles stay put. Length/depth can still change on their own
+ * when the handle only moves that axis.
+ */
+export function roofPatchForFootprint(
+  shape: Pick<WorkplaneShape, "width" | "depth" | "size" | "height" | "leftAngle" | "rightAngle">,
+  nextWidth: number,
+  nextDepth: number,
+): Partial<WorkplaneShape> {
+  const oldW = Math.max(0.001, shapeWidth(shape));
+  const width = Math.max(0.001, nextWidth);
+  const depth = Math.max(0.001, nextDepth);
+  const scale = width / oldW;
+  const patch: Partial<WorkplaneShape> = {
+    width,
+    depth,
+    size: resizedShapeSize(width, depth),
+    height: Math.max(0.001, shape.height * scale),
+  };
+  if (typeof shape.leftAngle === "number") {
+    patch.leftAngle = shape.leftAngle;
+  }
+  if (typeof shape.rightAngle === "number") {
+    patch.rightAngle = shape.rightAngle;
+  }
+  return patch;
+}
+
+/** Shift-drag height: scale the triangle base with the rise so angles stay put. */
+export function roofPatchForHeight(
+  shape: Pick<WorkplaneShape, "width" | "depth" | "size" | "height" | "leftAngle" | "rightAngle">,
+  nextHeight: number,
+): Partial<WorkplaneShape> {
+  const oldH = Math.max(0.001, shape.height);
+  const height = Math.max(0.001, nextHeight);
+  const scale = height / oldH;
+  const width = Math.max(0.001, shapeWidth(shape) * scale);
+  const depth = shapeDepth(shape);
+  const patch: Partial<WorkplaneShape> = {
+    width,
+    depth,
+    size: resizedShapeSize(width, depth),
+    height,
+  };
+  if (typeof shape.leftAngle === "number") {
+    patch.leftAngle = shape.leftAngle;
+  }
+  if (typeof shape.rightAngle === "number") {
+    patch.rightAngle = shape.rightAngle;
+  }
+  return patch;
+}
+
 function edgeTreatmentPreserveZone(shape: WorkplaneShape): number {
   const own = Math.max(...(shape.edgeTreatments ?? []).map((feature) => feature.amount), 0);
   const child = Math.max(...(shape.groupedShapes ?? []).map(edgeTreatmentPreserveZone), 0);
@@ -174,6 +228,23 @@ export function resizedImportedMeshPositions(shape: WorkplaneShape) {
 
 export function resizedShapeSize(width: number, depth: number) {
   return Math.max(width, depth);
+}
+
+/**
+ * Scale for live grouped children. Must use the size captured at Group time
+ * (`groupedBase*`), not a Three.js wrapper AABB: patterned copies carry yaw,
+ * and a sphere-based Box3 is larger than the vertex AABB used to size the
+ * group, so fitting to that box pulls every instance toward the group center.
+ */
+export function groupedChildrenDisplayScale(shape: Pick<WorkplaneShape, "width" | "depth" | "size" | "height" | "groupedBaseWidth" | "groupedBaseHeight" | "groupedBaseDepth">) {
+  const width = shapeWidth(shape);
+  const depth = shapeDepth(shape);
+  const height = shape.height;
+  return {
+    x: width / Math.max(0.001, shape.groupedBaseWidth ?? width),
+    y: height / Math.max(0.001, shape.groupedBaseHeight ?? height),
+    z: depth / Math.max(0.001, shape.groupedBaseDepth ?? depth),
+  };
 }
 
 export function proportionalResizeScale(startWidth: number, startDepth: number, nextWidth: number, nextDepth: number) {
@@ -309,7 +380,10 @@ export function workplaneShapesEqual(a: WorkplaneShape, b: WorkplaneShape) {
     a.groupedBaseDepth === b.groupedBaseDepth &&
     a.groupedBaseHeight === b.groupedBaseHeight &&
     a.locked === b.locked &&
-    a.hidden === b.hidden
+    a.hidden === b.hidden &&
+    a.construction === b.construction &&
+    a.patternFeature === b.patternFeature &&
+    a.holeSpec === b.holeSpec
   );
 }
 

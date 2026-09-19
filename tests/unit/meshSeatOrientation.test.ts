@@ -77,6 +77,27 @@ describe("seatTriangleSoupOnLargestFlatSurface", () => {
     const size = bounds(seated.positions);
     expect(size.minY + size.height / 2).toBeGreaterThan(size.minY);
   });
+
+  it("still seats a large plate whose triangles are subsampled", () => {
+    // 60k triangles: past the sampling budget, so this also proves the bounded pass
+    // still finds a dominant flat face.
+    const sphere = new THREE.SphereGeometry(3, 120, 120).toNonIndexed();
+    const spherePosition = sphere.getAttribute("position");
+    const positions = boxPositions(40, 6, 30);
+    for (let i = 0; i < spherePosition.count; i += 1) {
+      positions.push(spherePosition.getX(i), spherePosition.getY(i) + 20, spherePosition.getZ(i));
+    }
+    sphere.dispose();
+
+    const started = Date.now();
+    const seated = seatTriangleSoupOnLargestFlatSurface(positions);
+    const elapsed = Date.now() - started;
+
+    expect(positions.length / 9).toBeGreaterThan(20000);
+    // The unbounded pass grew quadratically; this must stay interactive.
+    expect(elapsed).toBeLessThan(2000);
+    expect(bounds(seated.positions).height).toBeGreaterThan(0);
+  });
 });
 
 describe("importTriangleSoup seating", () => {

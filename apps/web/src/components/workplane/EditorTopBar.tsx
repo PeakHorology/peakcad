@@ -160,23 +160,27 @@ export function EditorTopBar({
   onProjectNameChange,
   onHome,
   onImport,
+  onSaveProject,
+  onSaveProjectAs,
+  hasMatchingSavedFile = false,
   onExport,
-  onBlueprintExport,
-  blueprintExporting = false,
   toolbarMode,
   onToolbarModeChange,
-  tools,
+  leftTools,
+  rightTools,
 }: {
   projectName?: string;
   onProjectNameChange?: (name: string) => void;
   onHome?: () => void;
   onImport: () => void;
+  onSaveProject?: () => void;
+  onSaveProjectAs?: () => void;
+  hasMatchingSavedFile?: boolean;
   onExport: () => void;
-  onBlueprintExport?: () => void;
-  blueprintExporting?: boolean;
   toolbarMode: ToolbarMode;
   onToolbarModeChange: (mode: ToolbarMode) => void;
-  tools?: ReactNode;
+  leftTools?: ReactNode;
+  rightTools?: ReactNode;
 }) {
   const logo = <img className="peakcad-logo" src="assets/peakcad/peakcad-logo.png" alt="PeakCAD" draggable={false} />;
   const homeRef = useRef<HTMLButtonElement>(null);
@@ -214,29 +218,33 @@ export function EditorTopBar({
         />
       </div>
 
-      <EditorModeTabs toolbarMode={toolbarMode} onToolbarModeChange={onToolbarModeChange} />
-
-      <div className="editor-top-bar-tools">{tools}</div>
+      <div className="editor-top-bar-tools">
+        <div className="toolbar-overflow">
+          <div className="toolbar-overflow-left">{leftTools}</div>
+          <div className="toolbar-overflow-center">
+            <EditorModeTabs toolbarMode={toolbarMode} onToolbarModeChange={onToolbarModeChange} />
+          </div>
+          <div className="toolbar-overflow-right">{rightTools}</div>
+        </div>
+      </div>
 
       <div className="editor-top-bar-right">
         <PeakTipButton className="editor-top-bar-text" label="Import" description={TOOL_DESCRIPTIONS.import} onClick={onImport}>
           Import
         </PeakTipButton>
+        {hasMatchingSavedFile && onSaveProject ? (
+          <PeakTipButton className="editor-top-bar-text" label="Save" description={TOOL_DESCRIPTIONS.saveProject} onClick={onSaveProject}>
+            Save
+          </PeakTipButton>
+        ) : null}
+        {!hasMatchingSavedFile && onSaveProjectAs ? (
+          <PeakTipButton className="editor-top-bar-text" label="Save as" description={TOOL_DESCRIPTIONS.saveProjectAs} onClick={onSaveProjectAs}>
+            Save as
+          </PeakTipButton>
+        ) : null}
         <PeakTipButton className="editor-top-bar-text" label="Export" description={TOOL_DESCRIPTIONS.export} onClick={onExport}>
           Export
         </PeakTipButton>
-        {onBlueprintExport ? (
-          <PeakTipButton
-            className={`editor-top-bar-text ${blueprintExporting ? "disabled" : ""}`}
-            label={blueprintExporting ? "Building blueprint…" : "Blueprint"}
-            description={TOOL_DESCRIPTIONS.blueprint}
-            aria-busy={blueprintExporting}
-            disabled={blueprintExporting}
-            onClick={onBlueprintExport}
-          >
-            Blueprint
-          </PeakTipButton>
-        ) : null}
         <PeakTipButton
           className="editor-top-bar-icon"
           label="Settings"

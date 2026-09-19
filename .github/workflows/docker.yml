@@ -50,5 +50,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha,scope=sketchforge-docker
-          cache-to: type=gha,mode=max,scope=sketchforge-docker
+          cache-from: type=gha,scope=peakcad-docker
+          cache-to: type=gha,mode=max,scope=peakcad-docker

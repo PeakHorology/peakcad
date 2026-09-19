@@ -43,7 +43,185 @@ function unsupportedReason(): string {
   return "no exact B-Rep mapping";
 }
 
-type BuildOutcome = { solid: BrepSolid; quality: StepExportQuality } | { skip: string };
+type BuildOutcome = { solid: BrepSolid; quality: StepExportQuality; warning?: string } | { skip: string };
+
+/** Bottom-center of a triangle soup, matching meshPositionsToGroupShape. */
+export function meshFrameOriginFromPositions(positions: ArrayLike<number>): { x: number; y: number; z: number } | null {
+  if (positions.length < 9) return null;
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let minZ = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxZ = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i + 2 < positions.length; i += 3) {
+    minX = Math.min(minX, positions[i]);
+    maxX = Math.max(maxX, positions[i]);
+    minY = Math.min(minY, positions[i + 1]);
+    minZ = Math.min(minZ, positions[i + 2]);
+    maxZ = Math.max(maxZ, positions[i + 2]);
+  }
+  if (![minX, minY, minZ, maxX, maxZ].every(Number.isFinite)) return null;
+  return { x: (minX + maxX) / 2, y: minY, z: (minZ + maxZ) / 2 };
+}
+
+function isLocalMeshFrameOrigin(origin: { x: number; y: number; z: number }): boolean {
+  return Math.abs(origin.x) < 0.05 && Math.abs(origin.z) < 0.05 && Math.abs(origin.y) < 0.05;
+}
+
+export type AxisExtents = {
+  width: number;
+  height: number;
+  depth: number;
+};
+
+export function extentsFromPositions(positions: ArrayLike<number>): AxisExtents | null {
+  if (positions.length < 9) return null;
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let minZ = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  let maxZ = Number.NEGATIVE_INFINITY;
+  for (let i = 0; i + 2 < positions.length; i += 3) {
+    minX = Math.min(minX, positions[i]);
+    maxX = Math.max(maxX, positions[i]);
+    minY = Math.min(minY, positions[i + 1]);
+    maxY = Math.max(maxY, positions[i + 1]);
+    minZ = Math.min(minZ, positions[i + 2]);
+    maxZ = Math.max(maxZ, positions[i + 2]);
+  }
+  if (![minX, minY, minZ, maxX, maxY, maxZ].every(Number.isFinite)) return null;
+  return { width: maxX - minX, height: maxY - minY, depth: maxZ - minZ };
+}
+
+export function booleanResultLooksExploded(before: AxisExtents, after: AxisExtents): boolean {
+  const beforeDiag = Math.hypot(before.width, before.height, before.depth);
+  const afterDiag = Math.hypot(after.width, after.height, after.depth);
+  if (!(beforeDiag > 1e-6)) return afterDiag > 1;
+  return afterDiag > beforeDiag * 6 || afterDiag < beforeDiag * 0.05;
+}
+
+/**
+ * Scale a reimported Group STEP so it matches the live shape size.
+ * Always prefer measured STEP extents over stored baseWidth — a stale bake or
+ * unit/frame mismatch is what made stacked knurl Groups explode or vanish.
+ */
+export function resolveImportedSolidScale(shape: AxisExtents, step: AxisExtents): AxisExtents {
+  const axis = (live: number, measured: number) => {
+    if (!(measured > 1e-6) || !(live > 1e-6)) return 1;
+    const scale = live / measured;
+    return Number.isFinite(scale) && scale > 0 ? scale : 1;
+  };
+  return {
+    width: axis(shape.width, step.width),
+    height: axis(shape.height, step.height),
+    depth: axis(shape.depth, step.depth),
+  };
+}
+
+/**
+ * Fuse/cut leftover same-plane faces into one face. Without this, overlapping
+ * boxes (knurls, radial hubs) stay a starburst of intersection seams.
+ */
+const BOOLEAN_UNIFY = {
+  fuzzyValue: 1e-4,
+} as const;
+
+function solidExtents(brep: Brep, solid: BrepSolid): AxisExtents | null {
+  try {
+    const tess = brep.mesh(solid as never);
+    return tess?.vertices ? extentsFromPositions(tess.vertices) : null;
+  } catch {
+    return null;
+  }
+}
+
+function unifyBooleanSolid(brep: Brep, solid: BrepSolid): BrepSolid {
+  const before = solidExtents(brep, solid);
+  try {
+    const simplified = brep.simplify(solid);
+    if (!simplified.ok) return solid;
+    const next = simplified.value as BrepSolid;
+    const after = solidExtents(brep, next);
+    if (before && after && booleanResultLooksExploded(before, after)) return solid;
+    return next;
+  } catch {
+    // Keep the fused solid when UnifySameDomain rejects a valid result.
+  }
+  return solid;
+}
+
+function fuseAllUnified(brep: Brep, solids: BrepSolid[]): { ok: true; value: BrepSolid } | { ok: false; error?: unknown } {
+  if (solids.length === 0) return { ok: false };
+  if (solids.length === 1) return { ok: true, value: unifyBooleanSolid(brep, solids[0]) };
+  const native = brep.fuseAll(solids, BOOLEAN_UNIFY);
+  if (native.ok) return { ok: true, value: unifyBooleanSolid(brep, native.value) };
+  const pairwise = brep.fuseAll(solids, { ...BOOLEAN_UNIFY, strategy: "pairwise" });
+  if (pairwise.ok) return { ok: true, value: unifyBooleanSolid(brep, pairwise.value) };
+  return native;
+}
+
+function cutAllUnified(
+  brep: Brep,
+  base: BrepSolid,
+  holes: BrepSolid[],
+): { ok: true; value: BrepSolid } | { ok: false; error?: unknown } {
+  if (holes.length === 0) return { ok: true, value: unifyBooleanSolid(brep, base) };
+  const cut = brep.cutAll(base, holes, BOOLEAN_UNIFY);
+  if (!cut.ok) return cut;
+  return { ok: true, value: unifyBooleanSolid(brep, cut.value) };
+}
+
+function intersectAllUnified(
+  brep: Brep,
+  operands: BrepSolid[],
+): { ok: true; value: BrepSolid } | { ok: false; error?: unknown } {
+  if (operands.length === 0) return { ok: false };
+  if (operands.length === 1) return { ok: true, value: unifyBooleanSolid(brep, operands[0]) };
+  let acc = operands[0];
+  for (let i = 1; i < operands.length; i += 1) {
+    const next = brep.intersect(acc, operands[i], BOOLEAN_UNIFY);
+    if (!next.ok) return next;
+    acc = next.value;
+  }
+  return { ok: true, value: unifyBooleanSolid(brep, acc) };
+}
+
+function displayEdgesFromBooleanSolid(
+  brep: Brep,
+  solid: BrepSolid,
+): { points: number[] }[] {
+  try {
+    const edges = brep.meshEdges(solid as never);
+    const lines = edges?.lines;
+    if (!lines || lines.length < 6) return [];
+    const groups = edges.edgeGroups ?? [];
+    const raw: number[][] = [];
+    for (const group of groups) {
+      let slice = Array.from(lines.slice(group.start, group.start + group.count));
+      if (slice.length < 6 && group.count >= 2) {
+        slice = Array.from(lines.slice(group.start * 3, (group.start + group.count) * 3));
+      }
+      if (slice.length >= 6) raw.push(slice);
+    }
+    if (raw.length === 0) raw.push(Array.from(lines));
+    return raw.map((points) => ({ points })).filter((edge) => edge.points.length >= 6);
+  } catch {
+    return [];
+  }
+}
+
+/** Move a world-space solid into the imported-mesh local frame (XZ centered, Y from 0). */
+function recenterSolidToLocalMeshFrame(brep: Brep, solid: BrepSolid): BrepSolid {
+  try {
+    const tess = brep.mesh(solid as never);
+    const origin = tess?.vertices ? meshFrameOriginFromPositions(tess.vertices) : null;
+    if (!origin || isLocalMeshFrameOrigin(origin)) return solid;
+    return brep.translate(solid, [-origin.x, -origin.y, -origin.z]);
+  } catch {
+    return solid;
+  }
+}
 
 function buildExactSolid(brep: Brep, shape: WorkplaneShape): BuildOutcome {
   const built = buildNativeShapeSolid(brep, shape);
@@ -84,14 +262,27 @@ async function buildImportedBody(brep: Brep, shape: WorkplaneShape): Promise<Bui
   }
 
   const h = shape.height;
-  const sx = shapeWidth(shape) / Math.max(0.001, mesh.baseWidth);
-  const sy = h / Math.max(0.001, mesh.baseHeight);
-  const sz = shapeDepth(shape) / Math.max(0.001, mesh.baseDepth);
-  let body = imported.value as unknown as BrepSolid;
+  // Group booleans used to store world-space STEP. Recenter those leftovers so
+  // applying the shape pose does not double-offset nested unions.
+  let body = recenterSolidToLocalMeshFrame(brep, imported.value as unknown as BrepSolid);
+  const measured = solidExtents(brep, body);
+  const scale = measured
+    ? resolveImportedSolidScale(
+      { width: shapeWidth(shape), height: h, depth: shapeDepth(shape) },
+      measured,
+    )
+    : {
+      width: shapeWidth(shape) / Math.max(0.001, mesh.baseWidth),
+      height: h / Math.max(0.001, mesh.baseHeight),
+      depth: shapeDepth(shape) / Math.max(0.001, mesh.baseDepth),
+    };
+  const sx = scale.width;
+  const sy = scale.height;
+  const sz = scale.depth;
 
   if (Math.abs(sx - sy) < 1e-6 && Math.abs(sy - sz) < 1e-6) {
     if (Math.abs(sx - 1) > 1e-6) body = brep.scale(body, sx);
-  } else {
+  } else if (Math.abs(sx - 1) > 1e-6 || Math.abs(sy - 1) > 1e-6 || Math.abs(sz - 1) > 1e-6) {
     const scaled = brep.applyMatrix(body, { linear: [sx, 0, 0, 0, sy, 0, 0, 0, sz], translation: [0, 0, 0] });
     if (!scaled.ok) {
       return { skip: `non-uniform scale failed: ${String(scaled.error.message ?? scaled.error)}` };
@@ -125,6 +316,10 @@ async function buildCadBrepBody(brep: Brep, shape: WorkplaneShape): Promise<Buil
       return { skip: `cadBrep restore failed: ${String(restored.error.message ?? restored.error)}` };
     }
     let body = restored.value as unknown as BrepSolid;
+    // Fillet/chamfer stores cadBrep in the worker's world frame. The display
+    // mesh is recentered to local (XZ centered, Y from 0). Recenter here too
+    // so Group does not apply the pose twice and slide the hole off the body.
+    body = recenterSolidToLocalMeshFrame(brep, body);
     const h = shape.height;
     const frame = shape.cadBrepFrame;
     if (frame) {
@@ -276,37 +471,21 @@ async function buildCsgBodySolid(
     // Nested assemble under another boolean still fuses — top-level assemble is
     // expanded to multi-solid STEP in exportShapesToStep.
     if (op === "union" || op === "assemble") {
-      if (solidChildren.length === 1) {
-        solid = solidChildren[0];
-      } else {
-        const fused = brep.fuseAll(solidChildren);
-        if (!fused.ok) throw fused.error;
-        solid = fused.value;
-      }
+      const fused = fuseAllUnified(brep, solidChildren);
+      if (!fused.ok) throw fused.error;
+      solid = fused.value;
     } else if (op === "subtract") {
-      let base = solidChildren[0];
-      if (solidChildren.length > 1) {
-        const fused = brep.fuseAll(solidChildren);
-        if (!fused.ok) throw fused.error;
-        base = fused.value;
-      }
-      if (holeChildren.length === 0) {
-        solid = base;
-      } else {
-        const cut = brep.cutAll(base, holeChildren);
-        if (!cut.ok) throw cut.error;
-        solid = cut.value;
-      }
+      const fused = fuseAllUnified(brep, solidChildren);
+      if (!fused.ok) throw fused.error;
+      const cut = cutAllUnified(brep, fused.value, holeChildren);
+      if (!cut.ok) throw cut.error;
+      solid = cut.value;
     } else if (op === "intersect") {
       const operands = [...solidChildren, ...holeChildren];
       if (operands.length < 2) return { skip: "CSG intersect needs at least two operands" };
-      let acc = operands[0];
-      for (let i = 1; i < operands.length; i += 1) {
-        const next = brep.intersect(acc, operands[i]);
-        if (!next.ok) throw next.error;
-        acc = next.value;
-      }
-      solid = acc;
+      const next = intersectAllUnified(brep, operands);
+      if (!next.ok) throw next.error;
+      solid = next.value;
     } else {
       return { skip: `unsupported CSG op ${op}` };
     }
@@ -316,14 +495,18 @@ async function buildCsgBodySolid(
   }
 
   if (leafFailures > 0 && allowFaceted && shape.importedMesh?.positions.length && shape.importedMesh.positions.length >= 9) {
-    return buildFacetedSolid(brep, shape);
+    const faceted = await buildFacetedSolid(brep, shape);
+    if ("skip" in faceted) return faceted;
+    return {
+      ...faceted,
+      warning: "One or more CSG features could not be rebuilt — exported the last good mesh",
+    };
   }
 
-  // Nested under another CSG: keep group-local placement (parent will place).
-  // Top-level group: map local → world via group pose.
   return {
     solid: placeGroupLocalSolid(brep, solid, shape),
     quality,
+    warning: leafFailures > 0 ? "One or more CSG features could not be rebuilt" : undefined,
   };
 }
 
@@ -371,7 +554,7 @@ export async function exportShapesToStep(shapes: WorkplaneShape[]): Promise<Step
   const skipped: SkippedShape[] = [];
   const degraded: SkippedShape[] = [];
   const holes: { box: Aabb; solid: BrepSolid; quality: StepExportQuality }[] = [];
-  for (const shape of shapes.filter((s) => s.hole && !isEvaluatedCsgBody(s) && !isAssembleBody(s) && !s.csg?.suppressed && !s.hidden)) {
+  for (const shape of shapes.filter((s) => s.hole && !s.construction && !isEvaluatedCsgBody(s) && !isAssembleBody(s) && !s.csg?.suppressed && !s.hidden)) {
     const built = await buildShapeSolid(brep, shape, skipped, { allowFaceted: true });
     if ("skip" in built) {
       // The cutter is gone, so every part it would have bored ships uncut.
@@ -382,7 +565,7 @@ export async function exportShapesToStep(shapes: WorkplaneShape[]): Promise<Step
   }
 
   const parts: { shape: BrepSolid; name: string; color: string; quality: StepExportQuality }[] = [];
-  for (const shape of shapes.filter((s) => !s.hole && !s.csg?.suppressed && !s.hidden && !s.suppressed)) {
+  for (const shape of shapes.filter((s) => !s.hole && !s.construction && !s.csg?.suppressed && !s.hidden && !s.suppressed)) {
     // Multi-body assemblies: keep children as separate STEP solids (do not fuse).
     if (isAssembleBody(shape)) {
       const children = (shape.groupedShapes ?? []).filter(
@@ -429,6 +612,9 @@ export async function exportShapesToStep(shapes: WorkplaneShape[]): Promise<Step
     if ("skip" in built) {
       skipped.push(describe(shape, built.skip));
       continue;
+    }
+    if (built.warning) {
+      degraded.push(describe(shape, built.warning));
     }
 
     let solid = built.solid;
@@ -483,7 +669,8 @@ export async function bakeCsgBodyBrepStep(shape: WorkplaneShape): Promise<Workpl
     const skipped: SkippedShape[] = [];
     const built = await buildShapeSolid(brep, shape, skipped, { allowFaceted: false });
     if ("skip" in built) return null;
-    const exported = brep.exportSTEP(built.solid as never);
+    const localSolid = recenterSolidToLocalMeshFrame(brep, built.solid);
+    const exported = brep.exportSTEP(localSolid as never);
     if (!exported.ok) return null;
     const brepStep = await exported.value.text();
     if (!brepStep.trim()) return null;
@@ -505,6 +692,8 @@ export type OcctBooleanMeshResult = {
   positions: number[];
   brepStep: string;
   quality: StepExportQuality;
+  /** World-space B-Rep feature edges after unify, for a clean viewport outline. */
+  displayEdges?: { points: number[] }[];
 };
 
 /**
@@ -534,49 +723,27 @@ export async function evaluateOcctBooleanOnWorldShapes(
     let solid: BrepSolid;
     if (op === "union") {
       if (solids.length === 0) return null;
-      if (solids.length === 1) solid = solids[0];
-      else {
-        const fused = brep.fuseAll(solids);
-        if (!fused.ok) return null;
-        solid = fused.value;
-      }
+      const fused = fuseAllUnified(brep, solids);
+      if (!fused.ok) return null;
+      solid = fused.value;
     } else if (op === "subtract") {
       if (solids.length === 0) return null;
-      let base = solids[0];
-      if (solids.length > 1) {
-        const fused = brep.fuseAll(solids);
-        if (!fused.ok) return null;
-        base = fused.value;
-      }
-      if (holes.length === 0) solid = base;
-      else {
-        const cut = brep.cutAll(base, holes);
-        if (!cut.ok) return null;
-        solid = cut.value;
-      }
+      const fused = fuseAllUnified(brep, solids);
+      if (!fused.ok) return null;
+      const cut = cutAllUnified(brep, fused.value, holes);
+      if (!cut.ok) return null;
+      solid = cut.value;
     } else {
       const operands = [...solids, ...holes];
       if (operands.length < 2) return null;
-      let acc = operands[0];
-      for (let i = 1; i < operands.length; i += 1) {
-        const next = brep.intersect(acc, operands[i]);
-        if (!next.ok) return null;
-        acc = next.value;
-      }
-      solid = acc;
+      const next = intersectAllUnified(brep, operands);
+      if (!next.ok) return null;
+      solid = next.value;
     }
 
-    // exportSTEP / mesh can WASM-abort on fragile solids — soft-fail so Manifold remesh can run.
-    let brepStep: string;
-    try {
-      const exported = brep.exportSTEP(solid as never);
-      if (!exported.ok) return null;
-      brepStep = await exported.value.text();
-    } catch {
-      return null;
-    }
-    if (!brepStep.trim()) return null;
-
+    // Tessellate in world space first so the editor can recenter the display mesh.
+    // Export STEP in the same local frame as that mesh (XZ centered, Y from 0) so a
+    // later Group does not apply the body pose a second time and pull parts apart.
     let positions: number[] = [];
     try {
       const tess = brep.mesh(solid as never);
@@ -589,7 +756,26 @@ export async function evaluateOcctBooleanOnWorldShapes(
       return null;
     }
     if (positions.length < 9) return null;
-    return { positions, brepStep, quality: "exact" };
+
+    let brepStep: string;
+    try {
+      const origin = meshFrameOriginFromPositions(positions);
+      const toExport = origin
+        ? brep.translate(solid, [-origin.x, -origin.y, -origin.z])
+        : solid;
+      const exported = brep.exportSTEP(toExport as never);
+      if (!exported.ok) return null;
+      brepStep = await exported.value.text();
+    } catch {
+      return null;
+    }
+    if (!brepStep.trim()) return null;
+    return {
+      positions,
+      brepStep,
+      quality: "exact",
+      displayEdges: displayEdgesFromBooleanSolid(brep, solid),
+    };
   } catch {
     // OCCT WASM Aborted() and similar — callers fall back to Manifold / mesh CSG.
     return null;

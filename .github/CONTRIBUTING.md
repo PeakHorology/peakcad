@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve SketchForge.
+Thanks for helping improve PeakCAD.
 
 ## Local Setup
 
@@ -15,16 +15,17 @@ The app runs at `http://127.0.0.1:3000/` by default.
 
 - Keep changes focused.
 - Avoid unrelated refactors.
-- Run `npm run typecheck`.
+- Run `npm run ci` (typecheck + unit + e2e).
 - Manually test the editor workflow you changed.
 - Include screenshots or short recordings for UI changes when possible.
 - Call out changes to storage, import, export, grouping, or undo/redo behavior.
+- Read [docs/BETA-LIMITATIONS.md](../docs/BETA-LIMITATIONS.md) when touching STEP, Group, fillet, or sketch.
 
 ## Areas That Need Care
 
-- STL import/export
+- STL / STEP / 3MF import/export
 - Imported mesh transforms
-- Grouping, hole subtraction, and ungrouping
+- Grouping, hole subtraction, and ungrouping (OCCT vs Manifold paths)
 - Undo/redo history
 - Project persistence and dashboard thumbnails
 - Shape gizmos, snapping, and rotated-object dimensions
@@ -38,4 +39,4 @@ The app runs at `http://127.0.0.1:3000/` by default.
 
 ## Contribution Licensing
 
-Unless explicitly agreed otherwise in writing, by submitting a contribution you license it under the MIT License. See [LICENSE](../LICENSE).
+By contributing, you agree that your contributions are licensed under the same GPL-3.0-or-later terms as the project.

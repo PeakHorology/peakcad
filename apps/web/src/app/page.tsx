@@ -1,8 +1,9 @@
 "use client";
 
-import { ArrowLeft, ChevronLeft, ChevronRight, EllipsisVertical, FolderPlus, Grid3X3, List, Pencil, Plus, Search, Settings, SlidersHorizontal, Star, Trash2, X } from "lucide-react";
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent, type ReactNode } from "react";
+import { ArrowLeft, EllipsisVertical, FolderOpen, FolderPlus, Grid3X3, List, Pencil, Plus, Search, Settings, SlidersHorizontal, Star, Trash2, X } from "lucide-react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent } from "react";
 import { SketchForgeEditor } from "@/components/SketchForgeEditor";
+import { IntroCoach } from "@/components/workplane/IntroCoach";
 import { hydrateEditorHistoryState, projectShapesFingerprint, type EditorHistoryEntry } from "@/lib/editorHistory";
 import { DOWNLOAD_FOLDER_STORAGE_KEY } from "@/lib/downloadFile";
 import { hardwareProfile } from "@/lib/desktopHardware";
@@ -19,6 +20,30 @@ import {
   workplaneSettingsFingerprint,
 } from "@/lib/workplaneSettings";
 import type { GridSize, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
+import {
+  createIntroProjectMeta,
+  createIntroShapes,
+  hasIntroBeenSeeded,
+  hasIntroCoachBeenDismissed,
+  INTRO_PROJECT_ID,
+  INTRO_PROJECT_NAME,
+  isIntroProjectId,
+  markIntroCoachDismissed,
+  markIntroSeeded,
+} from "@/lib/introProject";
+import { buildPeakcadDocument, peakcadBasename, peakcadFilename, peakcadNamesMatch, type PeakcadDocument } from "@/lib/peakcadDocument";
+import {
+  hasDesktopProjectFiles,
+  openPeakcadFile,
+  readPeakcadPath,
+  resolveDesktopPeakcadByName,
+  revealPeakcadFile,
+  savePeakcadAs,
+  subscribePeakcadMenu,
+  subscribePeakcadOpenPath,
+  writeNewDesktopPeakcad,
+  writePeakcadPath,
+} from "@/lib/peakcadFile";
 
 type AppView = "dashboard" | "editor";
 type ViewMode = "grid" | "list";
@@ -37,6 +62,8 @@ type DashboardProject = {
   workspace?: WorkplaneWorkspaceSettings;
   snapGrid?: GridSize;
   folderId?: string | null;
+  filePath?: string | null;
+  savedFileName?: string | null;
 };
 
 type DashboardFolder = {
@@ -82,10 +109,7 @@ const PROJECT_SHAPES_DB_VERSION = 2;
 const PROJECT_THUMBNAIL_MAX_SIZE = hardwareProfile().thumbnailSize;
 const PROJECT_ACCENTS: DashboardProject["accent"][] = ["cyan", "green", "gold", "red"];
 const STATIC_EXPORT_BUILD = process.env.NEXT_PUBLIC_STATIC_EXPORT === "true";
-/** Projects section: 5 columns × 2 rows. */
-const PROJECTS_PER_PAGE = 10;
-/** Folders section: 5 columns × 1 row. */
-const FOLDERS_PER_PAGE = 5;
+const RECENT_PROJECT_COUNT = 4;
 
 type DashboardOrder = {
   folders: string[];
@@ -117,6 +141,26 @@ function formatUpdated(timestamp: number) {
   if (age < 3_600_000) return `${Math.max(1, Math.round(age / 60_000))} min ago`;
   if (age < 86_400_000) return "Today";
   return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(timestamp));
+}
+
+function formatLibraryDate(timestamp = Date.now()) {
+  return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(timestamp));
+}
+
+function uniqueLibraryName(base: string, existing: string[]) {
+  const names = new Set(existing.map((name) => name.toLowerCase()));
+  if (!names.has(base.toLowerCase())) return base;
+  let suffix = 2;
+  while (names.has(`${base} (${suffix})`.toLowerCase())) suffix += 1;
+  return `${base} (${suffix})`;
+}
+
+function nextDesignName(projects: Array<{ name: string }>) {
+  return uniqueLibraryName(`Design · ${formatLibraryDate()}`, projects.map((project) => project.name));
+}
+
+function nextFolderName(folders: Array<{ name: string }>) {
+  return uniqueLibraryName(`Folder · ${formatLibraryDate()}`, folders.map((folder) => folder.name));
 }
 
 function projectShapeCacheEntry(
@@ -415,6 +459,10 @@ function readStoredProjects() {
           workspace: normalizeWorkspaceSettings(project.workspace),
           snapGrid: normalizeSnapGrid(project.snapGrid),
           folderId: typeof project.folderId === "string" ? project.folderId : null,
+          filePath: typeof project.filePath === "string" && project.filePath.trim() ? project.filePath : null,
+          savedFileName: typeof project.savedFileName === "string" && project.savedFileName.trim()
+            ? project.savedFileName.trim()
+            : null,
         };
       });
     return { projects, legacyShapes };
@@ -578,16 +626,6 @@ function sortByIdOrder<T extends { id: string }>(items: T[], order: string[] | n
   return [...items].sort((a, b) => (rank.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (rank.get(b.id) ?? Number.MAX_SAFE_INTEGER));
 }
 
-function chunkPages<T>(items: T[], pageSize: number): T[][] {
-  if (pageSize <= 0) return [items];
-  if (items.length === 0) return [[]];
-  const pages: T[][] = [];
-  for (let index = 0; index < items.length; index += pageSize) {
-    pages.push(items.slice(index, index + pageSize));
-  }
-  return pages;
-}
-
 function folderForStorage(folder: DashboardFolder): DashboardFolder {
   return {
     id: folder.id,
@@ -649,6 +687,8 @@ function mergeProjectForStorage(project: DashboardProject, storedProject?: Dashb
     return {
       ...project,
       folderId,
+      filePath: project.filePath ?? storedProject.filePath ?? null,
+      savedFileName: project.savedFileName ?? storedProject.savedFileName ?? null,
     };
   }
   return {
@@ -662,6 +702,8 @@ function mergeProjectForStorage(project: DashboardProject, storedProject?: Dashb
     workspace: project.workspace ?? storedProject.workspace,
     snapGrid: project.snapGrid ?? storedProject.snapGrid,
     folderId,
+    filePath: project.filePath ?? storedProject.filePath ?? null,
+    savedFileName: project.savedFileName ?? storedProject.savedFileName ?? null,
   };
 }
 
@@ -680,6 +722,31 @@ function projectForStorage(project: DashboardProject): DashboardProject {
     workspace: normalizeWorkspaceSettings(project.workspace),
     snapGrid: normalizeSnapGrid(project.snapGrid),
     folderId: project.folderId ?? null,
+    filePath: project.filePath ?? null,
+    savedFileName: project.savedFileName ?? (project.filePath ? peakcadBasename(project.filePath) : null),
+  };
+}
+
+function projectSavedFileName(project: Pick<DashboardProject, "filePath" | "savedFileName">) {
+  if (project.filePath) return peakcadBasename(project.filePath);
+  const saved = project.savedFileName?.trim();
+  return saved || null;
+}
+
+function projectMatchesSavedFile(project: Pick<DashboardProject, "name" | "filePath" | "savedFileName"> | null | undefined) {
+  if (!project) return false;
+  const saved = projectSavedFileName(project);
+  return Boolean(saved && peakcadNamesMatch(saved, project.name));
+}
+
+function withSavedPeakcadFile(project: DashboardProject, filePath?: string | null, fileName?: string | null): DashboardProject {
+  const savedFileName = filePath
+    ? peakcadBasename(filePath)
+    : (fileName?.trim() || peakcadFilename(project.name));
+  return {
+    ...project,
+    filePath: filePath ?? project.filePath ?? null,
+    savedFileName,
   };
 }
 
@@ -706,6 +773,28 @@ function newProject(name: string, index: number, shapeCount = 0, folderId: strin
   };
 }
 
+function buildDocumentForProject(project: DashboardProject, entry: ProjectShapeCacheEntry): PeakcadDocument {
+  return buildPeakcadDocument({
+    project: {
+      id: project.id,
+      name: project.name,
+      createdAt: project.createdAt,
+      updatedAt: project.updatedAt,
+      accent: project.accent,
+      shapes: entry.shapes.length,
+      revision: project.revision,
+      workspace: project.workspace,
+      snapGrid: project.snapGrid,
+      thumbnailUrl: project.thumbnailUrl ?? null,
+      thumbnailUrlDark: project.thumbnailUrlDark ?? null,
+      thumbnailVersion: project.thumbnailVersion,
+    },
+    shapes: entry.shapes,
+    history: entry.history,
+    historyIndex: entry.historyIndex,
+  });
+}
+
 export default function Home() {
   const [mounted, setMounted] = useState(false);
   const [view, setView] = useState<AppView>("dashboard");
@@ -720,16 +809,24 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [downloadFolder, setDownloadFolder] = useState("");
   const [dashboardNotice, setDashboardNotice] = useState("");
+  const [introCoachOpen, setIntroCoachOpen] = useState(false);
   const [projectShapesById, setProjectShapesById] = useState<Record<string, ProjectShapeCacheEntry>>({});
   const projectsJsonRef = useRef("");
   const foldersJsonRef = useRef("");
   const nextProjectRevisionRef = useRef(0);
   const projectShapeSaveQueuesRef = useRef<Record<string, Promise<void>>>({});
   const projectsRef = useRef<DashboardProject[]>([]);
+  const projectShapesByIdRef = useRef<Record<string, ProjectShapeCacheEntry>>({});
   const projectFolderMapRef = useRef<Record<string, string | null>>({});
+  const lastDiskRevisionRef = useRef<Record<string, number>>({});
+  const knownFilePathRef = useRef<Record<string, string>>({});
   const dashboardOrderRef = useRef<DashboardOrder>(emptyDashboardOrder());
+  const activeProjectIdRef = useRef<string | null>(activeProjectId);
   projectsRef.current = projects;
+  projectShapesByIdRef.current = projectShapesById;
   dashboardOrderRef.current = dashboardOrder;
+  activeProjectIdRef.current = activeProjectId;
+  const createAndOpenProjectRef = useRef<(name?: string) => void>(() => undefined);
 
   useEffect(() => {
     applyUiTheme(loadUiTheme());
@@ -740,19 +837,28 @@ export default function Home() {
       writeProjectFolderMap(seeded.map);
     }
     const projectsWithFolders = applyProjectFolderMap(storedProjects, projectFolderMapRef.current);
-    const storedFolders = withValidFolderHeroes(readFolders(), projectsWithFolders);
+    let homeProjects = projectsWithFolders;
+    if (!hasIntroBeenSeeded() && !homeProjects.some((project) => project.id === INTRO_PROJECT_ID)) {
+      const intro = createIntroProjectMeta();
+      const introEntry = projectShapeCacheEntry(intro.revision ?? intro.updatedAt, createIntroShapes());
+      homeProjects = [intro, ...homeProjects];
+      markIntroSeeded();
+      setProjectShapesById((current) => ({ ...current, [intro.id]: introEntry }));
+      void saveProjectShapes(intro.id, introEntry).catch(() => undefined);
+    }
+    const storedFolders = withValidFolderHeroes(readFolders(), homeProjects);
     const folderIds = storedFolders.map((folder) => folder.id);
-    const rootProjectIds = projectsWithFolders.filter((project) => !project.folderId).map((project) => project.id);
+    const allProjectIds = homeProjects.map((project) => project.id);
     const storedOrder = readDashboardOrder();
     const nextOrder: DashboardOrder = {
       folders: syncIdOrder(storedOrder.folders, folderIds),
-      projects: syncIdOrder(storedOrder.projects, rootProjectIds),
+      projects: syncIdOrder(storedOrder.projects, allProjectIds),
       byFolder: Object.fromEntries(
         storedFolders.map((folder) => [
           folder.id,
           syncIdOrder(
             storedOrder.byFolder[folder.id] ?? [],
-            projectsWithFolders.filter((project) => project.folderId === folder.id).map((project) => project.id),
+            homeProjects.filter((project) => project.folderId === folder.id).map((project) => project.id),
           ),
         ]),
       ),
@@ -760,7 +866,7 @@ export default function Home() {
     dashboardOrderRef.current = nextOrder;
     setDashboardOrder(nextOrder);
     writeDashboardOrder(nextOrder);
-    setProjects(projectsWithFolders);
+    setProjects(homeProjects);
     setFolders(storedFolders);
     foldersJsonRef.current = JSON.stringify(storedFolders.map(folderForStorage));
     if (STATIC_EXPORT_BUILD) {
@@ -1029,12 +1135,12 @@ export default function Home() {
   useEffect(() => {
     if (!mounted) return;
     const folderIds = folders.map((folder) => folder.id);
-    const rootProjectIds = projects.filter((project) => !project.folderId).map((project) => project.id);
+    const allProjectIds = projects.map((project) => project.id);
     setDashboardOrder((current) => {
       const safeCurrent = normalizeDashboardOrder(current);
       const next: DashboardOrder = {
         folders: syncIdOrder(safeCurrent.folders, folderIds),
-        projects: syncIdOrder(safeCurrent.projects, rootProjectIds),
+        projects: syncIdOrder(safeCurrent.projects, allProjectIds),
         byFolder: Object.fromEntries(
           folders.map((folder) => [
             folder.id,
@@ -1120,7 +1226,6 @@ export default function Home() {
   const rootProjects = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     const matched = projects.filter((project) => {
-      if (project.folderId) return false;
       if (!normalizedQuery) return true;
       return project.name.toLowerCase().includes(normalizedQuery);
     });
@@ -1161,6 +1266,156 @@ export default function Home() {
       window.history.replaceState(null, "", nextUrl);
     }
   };
+
+  const applyOpenedDocument = useCallback(
+    (opened: { document: PeakcadDocument; path: string | null }, shouldOpen: boolean) => {
+      const { document, path } = opened;
+      const existing = projectsRef.current.find(
+        (project) => project.id === document.project.id || (path != null && project.filePath === path),
+      );
+      const project: DashboardProject = {
+        id: existing?.id ?? document.project.id,
+        name: document.project.name,
+        createdAt: document.project.createdAt,
+        updatedAt: Date.now(),
+        shapes: document.shapes.length,
+        accent: document.project.accent,
+        thumbnailUrl: document.project.thumbnailUrl ?? existing?.thumbnailUrl ?? null,
+        thumbnailUrlDark: document.project.thumbnailUrlDark ?? existing?.thumbnailUrlDark ?? null,
+        thumbnailVersion: document.project.thumbnailVersion ?? existing?.thumbnailVersion,
+        revision: document.project.revision ?? Date.now(),
+        workspace: document.project.workspace,
+        snapGrid: document.project.snapGrid,
+        folderId: existing?.folderId ?? null,
+        filePath: path ?? existing?.filePath ?? null,
+        savedFileName: path ? peakcadBasename(path) : existing?.savedFileName ?? peakcadFilename(document.project.name),
+      };
+      const entry = projectShapeCacheEntry(
+        project.revision ?? project.updatedAt,
+        document.shapes,
+        document.history,
+        document.historyIndex,
+      );
+      setProjectShapesById((current) => ({ ...current, [project.id]: entry }));
+      void saveProjectShapes(project.id, entry).catch(() => {
+        setDashboardNotice("Could not store the opened project locally.");
+      });
+      if (document.project.thumbnailUrl) {
+        void saveProjectThumbnail(
+          project.id,
+          document.project.thumbnailUrl,
+          project.thumbnailVersion ?? project.updatedAt,
+          document.project.thumbnailUrlDark,
+        ).catch(() => undefined);
+      }
+      setProjects((current) => [
+        project,
+        ...current.filter((item) => item.id !== project.id && (path == null || item.filePath !== path)),
+      ]);
+      updateDashboardOrder((current) => ({
+        ...current,
+        projects: current.projects.includes(project.id) ? current.projects : [...current.projects, project.id],
+      }));
+      if (shouldOpen) {
+        setActiveProjectId(project.id);
+        setEditorStarted(true);
+        setView("editor");
+        if (typeof window !== "undefined") {
+          window.history.replaceState(null, "", `/?editor=1&project=${encodeURIComponent(project.id)}`);
+        }
+      }
+    },
+    [updateDashboardOrder],
+  );
+
+  const openFromDisk = useCallback(async () => {
+    try {
+      const opened = await openPeakcadFile();
+      if (!opened) return;
+      applyOpenedDocument(opened, true);
+    } catch (error) {
+      setDashboardNotice(error instanceof Error ? error.message : "Could not open that PeakCAD file.");
+    }
+  }, [applyOpenedDocument]);
+
+  const saveProjectToDisk = useCallback(async (
+    projectId: string,
+    forceSaveAs = false,
+    entryOverride?: ProjectShapeCacheEntry,
+  ) => {
+    const project = projectsRef.current.find((item) => item.id === projectId);
+    if (!project) return;
+    const cached =
+      entryOverride ??
+      projectShapesByIdRef.current[projectId] ??
+      projectShapeCacheEntry(project.revision ?? project.updatedAt, []);
+    try {
+      const document = buildDocumentForProject(project, cached);
+      if (!forceSaveAs && project.filePath && hasDesktopProjectFiles()) {
+        await writePeakcadPath(project.filePath, document);
+        lastDiskRevisionRef.current[projectId] = cached.revision;
+        setProjects((current) =>
+          current.map((item) => (item.id === projectId ? withSavedPeakcadFile(item, project.filePath) : item)),
+        );
+        setDashboardNotice(`Saved ${peakcadBasename(project.filePath)}`);
+        return;
+      }
+      const nextPath = await savePeakcadAs(document, project.name);
+      if (nextPath) {
+        lastDiskRevisionRef.current[projectId] = cached.revision;
+        setProjects((current) => current.map((item) => (item.id === projectId ? withSavedPeakcadFile(item, nextPath) : item)));
+        setDashboardNotice(`Saved ${peakcadBasename(nextPath)}`);
+      } else if (!hasDesktopProjectFiles()) {
+        setProjects((current) =>
+          current.map((item) => (item.id === projectId ? withSavedPeakcadFile(item, null, peakcadFilename(project.name)) : item)),
+        );
+        setDashboardNotice(`Downloaded ${peakcadFilename(project.name)}`);
+      }
+    } catch (error) {
+      setDashboardNotice(error instanceof Error ? error.message : "Could not save the PeakCAD file.");
+    }
+  }, []);
+
+  const persistCachedProjectFile = useCallback((projectId: string, filePath: string) => {
+    if (!hasDesktopProjectFiles()) return;
+    const latest = projectsRef.current.find((item) => item.id === projectId);
+    const cached = projectShapesByIdRef.current[projectId];
+    if (!latest || !cached) return;
+    lastDiskRevisionRef.current[projectId] = cached.revision;
+    void writePeakcadPath(filePath, buildDocumentForProject({ ...latest, filePath }, cached)).catch((error) => {
+      setDashboardNotice(error instanceof Error ? error.message : "Could not save the PeakCAD file.");
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!hasDesktopProjectFiles()) return;
+    for (const project of projects) {
+      if (!project.filePath) continue;
+      if (knownFilePathRef.current[project.id] === project.filePath) continue;
+      knownFilePathRef.current[project.id] = project.filePath;
+      persistCachedProjectFile(project.id, project.filePath);
+    }
+  }, [persistCachedProjectFile, projects]);
+
+  const attachMatchingDesktopFile = useCallback(async (projectId: string) => {
+    if (!hasDesktopProjectFiles()) return;
+    const project = projectsRef.current.find((item) => item.id === projectId);
+    if (!project || project.filePath || projectMatchesSavedFile(project)) return;
+    try {
+      const opened = await resolveDesktopPeakcadByName(project.name);
+      if (!opened?.path || opened.document.project.id !== project.id) return;
+      setProjects((current) =>
+        current.map((item) => (item.id === projectId ? withSavedPeakcadFile(item, opened.path) : item)),
+      );
+    } catch {
+      // Missing or unreadable files stay on Save as.
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!activeProjectId) return;
+    void attachMatchingDesktopFile(activeProjectId);
+  }, [activeProjectId, attachMatchingDesktopFile]);
 
   const updateProjectSnapshot = useCallback((snapshot: {
     image: string;
@@ -1279,7 +1534,18 @@ export default function Home() {
     });
 
     const previousSave = projectShapeSaveQueuesRef.current[snapshot.projectId] ?? Promise.resolve();
-    const queuedSave = previousSave.catch(() => undefined).then(() => saveProjectShapes(snapshot.projectId, entry));
+    const queuedSave = previousSave.catch(() => undefined).then(async () => {
+      await saveProjectShapes(snapshot.projectId, entry);
+      const project = projectsRef.current.find((item) => item.id === snapshot.projectId);
+      if (project?.filePath && hasDesktopProjectFiles()) {
+        const document = buildDocumentForProject(
+          { ...project, shapes: snapshot.shapes.length, updatedAt: revision, revision },
+          entry,
+        );
+        await writePeakcadPath(project.filePath, document);
+        lastDiskRevisionRef.current[snapshot.projectId] = revision;
+      }
+    });
     projectShapeSaveQueuesRef.current[snapshot.projectId] = queuedSave;
 
     void queuedSave
@@ -1336,7 +1602,7 @@ export default function Home() {
   }, []);
 
   const createAndOpenProject = (name?: string) => {
-    const project = newProject(name ?? `Untitled design ${projects.length + 1}`, projects.length);
+    const project = newProject(name ?? nextDesignName(projects), projects.length);
     const shapeEntry = projectShapeCacheEntry(project.revision ?? project.updatedAt, []);
     // Seed shapes + project list before switching views so the editor never mounts
     // against a missing cache entry (that unmount/remount cycle was blanking WebGL).
@@ -1357,6 +1623,53 @@ export default function Home() {
     setView("editor");
     if (typeof window !== "undefined") {
       window.history.replaceState(null, "", `/?editor=1&project=${encodeURIComponent(project.id)}`);
+    }
+    if (hasDesktopProjectFiles()) {
+      void writeNewDesktopPeakcad(buildDocumentForProject(project, shapeEntry), project.name)
+        .then((filePath) => {
+          if (!filePath) return;
+          setProjects((current) => current.map((item) => (item.id === project.id ? withSavedPeakcadFile(item, filePath) : item)));
+          persistCachedProjectFile(project.id, filePath);
+        })
+        .catch(() => {
+          setDashboardNotice("Created the design, but could not write a .peakcad file yet. Use Save As to pick a folder.");
+        });
+    }
+  };
+  createAndOpenProjectRef.current = createAndOpenProject;
+
+  const openOrCreateIntro = () => {
+    markIntroSeeded();
+    const existing = projectsRef.current.find((project) => project.id === INTRO_PROJECT_ID);
+    if (existing) {
+      openEditor(INTRO_PROJECT_ID, { allowMissingFromStorage: true });
+      return;
+    }
+    const intro = createIntroProjectMeta();
+    const entry = projectShapeCacheEntry(intro.revision ?? intro.updatedAt, createIntroShapes());
+    setProjectShapesById((current) => ({ ...current, [intro.id]: entry }));
+    void saveProjectShapes(intro.id, entry).catch(() => {
+      setDashboardNotice("Could not prepare the sample project.");
+    });
+    updateDashboardOrder((current) => ({
+      ...current,
+      projects: current.projects.includes(intro.id) ? current.projects : [...current.projects, intro.id],
+    }));
+    setProjects((current) => [intro, ...current.filter((item) => item.id !== intro.id)]);
+    setActiveProjectId(intro.id);
+    setEditorStarted(true);
+    setView("editor");
+    if (typeof window !== "undefined") {
+      window.history.replaceState(null, "", `/?editor=1&project=${encodeURIComponent(intro.id)}`);
+    }
+    if (hasDesktopProjectFiles()) {
+      void writeNewDesktopPeakcad(buildDocumentForProject(intro, entry), intro.name)
+        .then((filePath) => {
+          if (!filePath) return;
+          setProjects((current) => current.map((item) => (item.id === intro.id ? withSavedPeakcadFile(item, filePath) : item)));
+          persistCachedProjectFile(intro.id, filePath);
+        })
+        .catch(() => undefined);
     }
   };
 
@@ -1409,10 +1722,11 @@ export default function Home() {
     setProjects((current) =>
       current.map((project) => (project.id === projectId ? { ...project, name: nextName, updatedAt: Date.now() } : project)),
     );
+    void attachMatchingDesktopFile(projectId);
   };
 
   const createFolder = (name?: string) => {
-    const folder = newFolder((name?.trim() || `Folder ${folders.length + 1}`).slice(0, 80));
+    const folder = newFolder((name?.trim() || nextFolderName(folders)).slice(0, 80));
     updateDashboardOrder((current) => ({
       ...current,
       folders: current.folders.includes(folder.id) ? current.folders : [...current.folders, folder.id],
@@ -1463,16 +1777,17 @@ export default function Home() {
     projectFolderMapRef.current = nextMap;
     writeProjectFolderMap(nextMap);
     updateDashboardOrder((current) => {
-      const nextProjects = current.projects.filter((id) => id !== projectId);
       const byFolder = Object.fromEntries(
         Object.entries(current.byFolder).map(([id, members]) => [id, members.filter((memberId) => memberId !== projectId)]),
       );
       if (folderId) {
         byFolder[folderId] = [...(byFolder[folderId] ?? []), projectId];
-      } else {
-        nextProjects.push(projectId);
       }
-      return { ...current, projects: nextProjects, byFolder };
+      return {
+        ...current,
+        projects: current.projects.includes(projectId) ? current.projects : [...current.projects, projectId],
+        byFolder,
+      };
     });
     setProjects((current) => {
       const project = current.find((entry) => entry.id === projectId);
@@ -1511,6 +1826,48 @@ export default function Home() {
     );
   };
 
+  useEffect(() => {
+    return subscribePeakcadOpenPath((filePath) => {
+      void readPeakcadPath(filePath)
+        .then((opened) => applyOpenedDocument(opened, true))
+        .catch((error) => {
+          setDashboardNotice(error instanceof Error ? error.message : "Could not open that PeakCAD file.");
+        });
+    });
+  }, [applyOpenedDocument]);
+
+  useEffect(() => {
+    return subscribePeakcadMenu((action) => {
+      if (action === "new") {
+        createAndOpenProjectRef.current();
+        return;
+      }
+      if (action === "open") {
+        void openFromDisk();
+        return;
+      }
+      const projectId = activeProjectIdRef.current;
+      if (!projectId) {
+        if (action === "save" || action === "save-as") {
+          setDashboardNotice("Open a design to save a .peakcad file.");
+        }
+        return;
+      }
+      const project = projectsRef.current.find((item) => item.id === projectId);
+      void saveProjectToDisk(projectId, action === "save-as" || !projectMatchesSavedFile(project));
+    });
+  }, [openFromDisk, saveProjectToDisk]);
+
+  useEffect(() => {
+    if (view === "editor" && isIntroProjectId(activeProjectId) && !hasIntroCoachBeenDismissed()) {
+      setIntroCoachOpen(true);
+      return;
+    }
+    if (!isIntroProjectId(activeProjectId)) {
+      setIntroCoachOpen(false);
+    }
+  }, [activeProjectId, view]);
+
   if (!mounted) {
     return null;
   }
@@ -1518,6 +1875,7 @@ export default function Home() {
   const activeProject = activeProjectId ? projects.find((project) => project.id === activeProjectId) ?? null : null;
   const activeProjectShapeEntry = activeProjectId ? projectShapesById[activeProjectId] : null;
   const canRenderEditor = !activeProjectId || (Boolean(activeProject) && Boolean(activeProjectShapeEntry));
+
   const projectDebugSummary = projects.map((project) => ({
     id: project.id,
     revision: project.revision,
@@ -1548,13 +1906,19 @@ export default function Home() {
           viewMode={viewMode}
           onCloseSettings={() => setSettingsOpen(false)}
           onCreate={() => createAndOpenProject()}
+          onCreateIntro={openOrCreateIntro}
           onCreateFolder={createFolder}
           onDeleteFolder={deleteFolder}
           onDeleteProject={deleteProject}
           onDownloadFolderChange={setDownloadFolder}
           onMoveProjectToFolder={moveProjectToFolder}
+          onOpenFromDisk={() => void openFromDisk()}
           onOpenProject={openEditor}
           onOpenSettings={() => setSettingsOpen(true)}
+          onRevealProjectFile={(filePath) => void revealPeakcadFile(filePath).catch((error) => {
+            setDashboardNotice(error instanceof Error ? error.message : "Could not show that file.");
+          })}
+          onSaveProjectToDisk={(projectId, forceSaveAs) => void saveProjectToDisk(projectId, forceSaveAs)}
           onQueryChange={setQuery}
           onRenameFolder={renameFolder}
           onRenameProject={renameProject}
@@ -1587,7 +1951,35 @@ export default function Home() {
                 renameProject(activeProjectId, name);
               }
             }}
+            hasMatchingSavedFile={projectMatchesSavedFile(activeProject)}
+            onSaveProject={(snapshot) => {
+              const entry = projectShapeCacheEntry(
+                Date.now(),
+                snapshot.shapes,
+                snapshot.history,
+                snapshot.historyIndex,
+              );
+              const project = projectsRef.current.find((item) => item.id === snapshot.projectId);
+              void saveProjectToDisk(snapshot.projectId, !projectMatchesSavedFile(project), entry);
+            }}
+            onSaveProjectAs={(snapshot) => {
+              const entry = projectShapeCacheEntry(
+                Date.now(),
+                snapshot.shapes,
+                snapshot.history,
+                snapshot.historyIndex,
+              );
+              void saveProjectToDisk(snapshot.projectId, true, entry);
+            }}
           />
+          {introCoachOpen ? (
+            <IntroCoach
+              onDismiss={() => {
+                markIntroCoachDismissed();
+                setIntroCoachOpen(false);
+              }}
+            />
+          ) : null}
         </div>
       ) : null}
     </>
@@ -1608,13 +2000,17 @@ function Dashboard({
   viewMode,
   onCloseSettings,
   onCreate,
+  onCreateIntro,
   onCreateFolder,
   onDeleteFolder,
   onDeleteProject,
   onDownloadFolderChange,
   onMoveProjectToFolder,
+  onOpenFromDisk,
   onOpenProject,
   onOpenSettings,
+  onRevealProjectFile,
+  onSaveProjectToDisk,
   onQueryChange,
   onRenameFolder,
   onRenameProject,
@@ -1638,13 +2034,17 @@ function Dashboard({
   viewMode: ViewMode;
   onCloseSettings: () => void;
   onCreate: () => void;
+  onCreateIntro: () => void;
   onCreateFolder: (name?: string) => string;
   onDeleteFolder: (folderId: string) => void;
   onDeleteProject: (projectId: string) => void;
   onDownloadFolderChange: (value: string) => void;
   onMoveProjectToFolder: (projectId: string, folderId: string | null) => void;
+  onOpenFromDisk: () => void;
   onOpenProject: (projectId: string) => void;
   onOpenSettings: () => void;
+  onRevealProjectFile: (filePath: string) => void;
+  onSaveProjectToDisk: (projectId: string, forceSaveAs?: boolean) => void;
   onQueryChange: (value: string) => void;
   onRenameFolder: (folderId: string, name: string) => void;
   onRenameProject: (projectId: string, name: string) => void;
@@ -1685,8 +2085,6 @@ function Dashboard({
   const [folderCreateOpen, setFolderCreateOpen] = useState(false);
   const [moveProjectId, setMoveProjectId] = useState<string | null>(null);
   const [nameDraft, setNameDraft] = useState("");
-  const [folderPage, setFolderPage] = useState(1);
-  const [projectPage, setProjectPage] = useState(1);
 
   const projectPendingDelete = projects.find((project) => project.id === projectPendingDeleteId) ?? null;
   const projectPendingRename = projects.find((project) => project.id === projectPendingRenameId) ?? null;
@@ -1706,22 +2104,12 @@ function Dashboard({
       })()
     : [];
 
-  const occupiedFolders = useMemo(() => {
-    if (query.trim()) return rootFolders;
-    return rootFolders.filter((folder) => projectsInFolder(projects, folder.id).length > 0);
-  }, [projects, query, rootFolders]);
-
-  const folderTotalPages = Math.max(1, Math.ceil(occupiedFolders.length / FOLDERS_PER_PAGE));
-  const projectTotalPages = Math.max(
-    1,
-    Math.ceil((openFolder ? folderMembers.length : rootProjects.length) / PROJECTS_PER_PAGE),
-  );
-  const safeFolderPage = Math.min(folderPage, folderTotalPages);
-  const safeProjectPage = Math.min(projectPage, projectTotalPages);
-  const rootFolderPages = chunkPages(occupiedFolders, FOLDERS_PER_PAGE);
-  const rootProjectPages = chunkPages(rootProjects, PROJECTS_PER_PAGE);
-  const folderMemberPages = chunkPages(folderMembers, PROJECTS_PER_PAGE);
-  const folderArrangeIds = occupiedFolders.map((folder) => folder.id);
+  const showHomeOverview = !openFolder && !normalizedQuery;
+  const recentProjects = showHomeOverview
+    ? [...projects].sort((left, right) => right.updatedAt - left.updatedAt).slice(0, RECENT_PROJECT_COUNT)
+    : [];
+  const libraryProjects = rootProjects;
+  const folderArrangeIds = rootFolders.map((folder) => folder.id);
   const projectArrangeIds = openFolder
     ? folderMembers.map((project) => project.id)
     : rootProjects.map((project) => project.id);
@@ -1730,28 +2118,14 @@ function Dashboard({
     const order = arrangePreviewOrder ?? currentArrangeIds;
     return new Map(order.map((id, index) => [id, index]));
   }, [arrangePreviewOrder, currentArrangeIds]);
-  const folderCount = occupiedFolders.length;
-  const folderPageStart = folderCount === 0 ? 0 : (safeFolderPage - 1) * FOLDERS_PER_PAGE + 1;
-  const folderPageEnd = Math.min(folderCount, safeFolderPage * FOLDERS_PER_PAGE);
+  const folderCount = rootFolders.length;
   const projectVisibleCount = openFolder ? folderMembers.length : rootProjects.length;
-  const projectPageStart = projectVisibleCount === 0 ? 0 : (safeProjectPage - 1) * PROJECTS_PER_PAGE + 1;
-  const projectPageEnd = Math.min(projectVisibleCount, safeProjectPage * PROJECTS_PER_PAGE);
+  const libraryGridClass = viewMode === "grid" ? "project-grid project-grid-home" : "project-list";
 
   useEffect(() => {
-    setFolderPage(1);
-    setProjectPage(1);
     setOpenProjectMenuId(null);
     setOpenFolderMenuId(null);
   }, [query, sortMode, viewMode, openFolderId]);
-
-  useEffect(() => {
-    setFolderPage((current) => Math.min(current, Math.max(1, Math.ceil(occupiedFolders.length / FOLDERS_PER_PAGE) || 1)));
-  }, [occupiedFolders.length]);
-
-  useEffect(() => {
-    const count = openFolderId ? folderMembers.length : rootProjects.length;
-    setProjectPage((current) => Math.min(current, Math.max(1, Math.ceil(count / PROJECTS_PER_PAGE) || 1)));
-  }, [folderMembers.length, openFolderId, rootProjects.length]);
 
   useEffect(() => {
     if (!projectPendingDeleteId) return;
@@ -1814,9 +2188,8 @@ function Dashboard({
   };
 
   const confirmFolderCreate = () => {
-    const folderId = onCreateFolder(nameDraft.trim() || undefined);
+    onCreateFolder(nameDraft.trim() || undefined);
     closeNameDialogs();
-    setOpenFolderId(folderId);
   };
 
   const confirmFolderDelete = () => {
@@ -1831,13 +2204,11 @@ function Dashboard({
   const openFolderView = (folderId: string) => {
     closeMenus();
     setOpenFolderId(folderId);
-    setProjectPage(1);
   };
 
   const closeFolderView = () => {
     closeMenus();
     setOpenFolderId(null);
-    setProjectPage(1);
   };
 
   const commitArrangePreview = () => {
@@ -1886,6 +2257,32 @@ function Dashboard({
       event.dataTransfer.setData(PROJECT_DRAG_MIME, payload.id);
     }
     event.dataTransfer.setData("text/plain", payload.id);
+    event.dataTransfer.effectAllowed = "move";
+    try {
+      event.dataTransfer.setDragImage(event.currentTarget as Element, 28, 28);
+    } catch {
+      // Some hosts reject custom drag images; native preview is fine.
+    }
+  };
+
+  const beginProjectMoveDrag = (event: ReactDragEvent, projectId: string) => {
+    event.stopPropagation();
+    if (suppressProjectOpenTimerRef.current !== null) {
+      window.clearTimeout(suppressProjectOpenTimerRef.current);
+      suppressProjectOpenTimerRef.current = null;
+    }
+    suppressProjectOpenRef.current = true;
+    arrangeCommittedRef.current = true;
+    draggingItemRef.current = { id: projectId, kind: "project" };
+    arrangeScopeRef.current = null;
+    setArrangeScope(null);
+    setDraggingItemId(projectId);
+    setArrangeTargetId(null);
+    arrangePreviewOrderRef.current = null;
+    setArrangePreviewOrder(null);
+    setDropTargetFolderId(null);
+    event.dataTransfer.setData(PROJECT_DRAG_MIME, projectId);
+    event.dataTransfer.setData("text/plain", projectId);
     event.dataTransfer.effectAllowed = "move";
     try {
       event.dataTransfer.setDragImage(event.currentTarget as Element, 28, 28);
@@ -2030,18 +2427,30 @@ function Dashboard({
     onDrop: (event: ReactDragEvent) => handleArrangeDrop(event, targetId),
   });
 
-  const renderProjectCard = (project: DashboardProject, options: { inFolder?: DashboardFolder | null } = {}) => {
+  const renderProjectCard = (
+    project: DashboardProject,
+    options: { inFolder?: DashboardFolder | null; recent?: boolean } = {},
+  ) => {
     const inFolder = options.inFolder ?? null;
-    const isHero = Boolean(inFolder && inFolder.heroProjectId === project.id);
+    const containingFolder =
+      inFolder ?? (project.folderId ? folders.find((folder) => folder.id === project.folderId) ?? null : null);
+    const isRecent = Boolean(options.recent);
+    const isHero = Boolean(containingFolder && containingFolder.heroProjectId === project.id);
     return (
       <article
-        className={`project-card${draggingItemId === project.id ? " is-dragging" : ""}${arrangeTargetId === project.id ? " arrange-target" : ""}`}
-        key={project.id}
+        className={`project-card${isRecent ? " project-card-recent" : ""}${draggingItemId === project.id ? " is-dragging" : ""}${!isRecent && arrangeTargetId === project.id ? " arrange-target" : ""}`}
+        key={isRecent ? `recent-${project.id}` : project.id}
         draggable
-        style={tileArrangeStyle(project.id)}
-        onDragStart={(event) => beginArrangeDrag(event, { id: project.id, kind: "project" })}
+        style={isRecent ? undefined : tileArrangeStyle(project.id)}
+        onDragStart={(event) => {
+          if (isRecent) {
+            beginProjectMoveDrag(event, project.id);
+            return;
+          }
+          beginArrangeDrag(event, { id: project.id, kind: "project" });
+        }}
         onDragEnd={() => endArrangeDrag()}
-        {...arrangeHandlers(project.id)}
+        {...(isRecent ? {} : arrangeHandlers(project.id))}
       >
         <div
           className="project-card-open"
@@ -2064,10 +2473,13 @@ function Dashboard({
           />
           <span className="project-card-title">
             {isHero ? <Star className="project-hero-star" size={14} strokeWidth={2.4} fill="currentColor" /> : null}
+            {isIntroProjectId(project.id) ? <span className="project-sample-badge">Sample</span> : null}
             {project.name}
           </span>
           <span className="project-card-meta">
             {formatUpdated(project.updatedAt)} - {project.shapes} {project.shapes === 1 ? "shape" : "shapes"}
+            {containingFolder && !inFolder ? ` · ${containingFolder.name}` : ""}
+            {project.filePath ? ` · ${peakcadBasename(project.filePath)}` : ""}
           </span>
         </div>
         <button
@@ -2091,17 +2503,51 @@ function Dashboard({
               <Pencil size={16} />
               <span>Rename</span>
             </button>
-            {inFolder ? (
+            {containingFolder ? (
               <button
                 type="button"
                 role="menuitem"
                 onClick={() => {
                   closeMenus();
-                  onSetFolderHero(inFolder.id, project.id);
+                  onSetFolderHero(containingFolder.id, project.id);
                 }}
               >
                 <Star size={16} />
                 <span>{isHero ? "Hero project" : "Star as hero"}</span>
+              </button>
+            ) : null}
+            <button
+              type="button"
+              role="menuitem"
+              onClick={() => {
+                closeMenus();
+                onSaveProjectToDisk(project.id, !projectMatchesSavedFile(project));
+              }}
+            >
+              <span>{projectMatchesSavedFile(project) ? "Save" : "Save as…"}</span>
+            </button>
+            {projectMatchesSavedFile(project) ? (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  closeMenus();
+                  onSaveProjectToDisk(project.id, true);
+                }}
+              >
+                <span>Save as…</span>
+              </button>
+            ) : null}
+            {project.filePath ? (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  closeMenus();
+                  onRevealProjectFile(project.filePath as string);
+                }}
+              >
+                <span>Show in folder</span>
               </button>
             ) : null}
             <button
@@ -2115,7 +2561,7 @@ function Dashboard({
               <FolderPlus size={16} />
               <span>Move to folder…</span>
             </button>
-            {inFolder ? (
+            {containingFolder ? (
               <button
                 type="button"
                 role="menuitem"
@@ -2124,7 +2570,7 @@ function Dashboard({
                   onMoveProjectToFolder(project.id, null);
                 }}
               >
-                <span>Move to home</span>
+                <span>Remove from folder</span>
               </button>
             ) : null}
             <button
@@ -2178,102 +2624,6 @@ function Dashboard({
     },
   });
 
-  const renderPagination = (
-    label: string,
-    totalPages: number,
-    safePage: number,
-    onPageChange: (page: number) => void,
-  ) =>
-    totalPages > 1 ? (
-      <nav className="project-pagination" aria-label={label}>
-        <button
-          type="button"
-          className="project-page-nav"
-          aria-label="Previous page"
-          disabled={safePage <= 1}
-          onClick={() => {
-            closeMenus();
-            onPageChange(Math.max(1, safePage - 1));
-          }}
-        >
-          <ChevronLeft size={18} strokeWidth={2.4} />
-          <span>Previous</span>
-        </button>
-        <div className="project-page-numbers">
-          {Array.from({ length: totalPages }, (_, index) => index + 1).map((page) => (
-            <button
-              key={page}
-              type="button"
-              className={page === safePage ? "active" : ""}
-              aria-label={`Page ${page}`}
-              aria-current={page === safePage ? "page" : undefined}
-              onClick={() => {
-                closeMenus();
-                onPageChange(page);
-              }}
-            >
-              {page}
-            </button>
-          ))}
-        </div>
-        <button
-          type="button"
-          className="project-page-nav"
-          aria-label="Next page"
-          disabled={safePage >= totalPages}
-          onClick={() => {
-            closeMenus();
-            onPageChange(Math.min(totalPages, safePage + 1));
-          }}
-        >
-          <span>Next</span>
-          <ChevronRight size={18} strokeWidth={2.4} />
-        </button>
-      </nav>
-    ) : null;
-
-  const folderPagination = renderPagination("Folder pages", folderTotalPages, safeFolderPage, setFolderPage);
-  const projectPagination = renderPagination("Project pages", projectTotalPages, safeProjectPage, setProjectPage);
-
-  const renderCarousel = <T,>({
-    ariaLabel,
-    pages,
-    safePage,
-    variant,
-    renderItem,
-  }: {
-    ariaLabel: string;
-    pages: T[][];
-    safePage: number;
-    variant: "folders" | "projects";
-    renderItem: (item: T) => ReactNode;
-  }) => (
-    <div className={`dashboard-carousel dashboard-carousel-${variant}`} aria-label={ariaLabel}>
-      <div
-        className="dashboard-carousel-track"
-        style={{ transform: `translate3d(-${(safePage - 1) * 100}%, 0, 0)` }}
-      >
-        {pages.map((pageItems, pageIndex) => (
-          <div
-            key={`page-${pageIndex}`}
-            className="dashboard-carousel-page"
-            aria-hidden={pageIndex !== safePage - 1}
-          >
-            <div
-              className={
-                viewMode === "grid"
-                  ? `project-grid project-grid-home project-grid-${variant}`
-                  : "project-list project-list-carousel"
-              }
-            >
-              {pageItems.map((item) => renderItem(item))}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-
   const renderFolderCard = (folder: DashboardFolder) => {
     const members = projectsInFolder(projects, folder.id);
     const hero = resolveFolderHero(folder, projects);
@@ -2313,7 +2663,6 @@ function Dashboard({
             ) : (
               <span className="folder-preview-empty">
                 <span className="preview-grid" />
-                <span className="preview-empty-mark">Drop projects here</span>
               </span>
             )}
           </span>
@@ -2372,18 +2721,48 @@ function Dashboard({
           }}
         >
           <img className="peakcad-logo" src="assets/peakcad/peakcad-logo.png" alt="PeakCAD" />
-          <span className="dashboard-brand-copy">
-            <span className="dashboard-brand-name">PeakCAD</span>
-            <span className="dashboard-brand-developer">PeakHorologyLLC</span>
-          </span>
+          <span className="dashboard-brand-name">PeakCAD</span>
         </button>
-        {!settingsOpen ? (
-          <button className="dashboard-topbar-settings" type="button" aria-label="Settings" title="Settings" onClick={onOpenSettings}>
-            <Settings size={20} strokeWidth={2.4} />
+        <div className="dashboard-topbar-tools">
+          <div className="dashboard-search">
+            <Search size={18} strokeWidth={2.4} />
+            <input
+              value={query}
+              onChange={(event) => onQueryChange(event.currentTarget.value)}
+              placeholder={openFolder ? "Search in folder" : "Search designs"}
+              aria-label={openFolder ? "Search in folder" : "Search designs"}
+            />
+          </div>
+          <button className="dashboard-secondary" type="button" onClick={onOpenFromDisk}>
+            <FolderOpen size={18} strokeWidth={2.4} />
+            <span>Open</span>
           </button>
-        ) : (
-          <span className="dashboard-topbar-settings" aria-hidden="true" />
-        )}
+          {!openFolder ? (
+            <button
+              className="dashboard-secondary"
+              type="button"
+              onClick={() => {
+                closeMenus();
+                setFolderCreateOpen(true);
+                setNameDraft(nextFolderName(folders));
+              }}
+            >
+              <FolderPlus size={18} strokeWidth={2.4} />
+              <span>New folder</span>
+            </button>
+          ) : null}
+          <button className="dashboard-primary" type="button" onClick={onCreate}>
+            <Plus size={20} strokeWidth={2.6} />
+            <span>New design</span>
+          </button>
+          {!settingsOpen ? (
+            <button className="dashboard-topbar-settings" type="button" aria-label="Settings" title="Settings" onClick={onOpenSettings}>
+              <Settings size={20} strokeWidth={2.4} />
+            </button>
+          ) : (
+            <span className="dashboard-topbar-settings" aria-hidden="true" />
+          )}
+        </div>
       </header>
 
       <div className="dashboard-layout">
@@ -2392,35 +2771,6 @@ function Dashboard({
           aria-label={openFolder ? `Folder ${openFolder.name}` : "Dashboard"}
           {...(openFolder ? folderDropHandlers(openFolder.id) : {})}
         >
-          <div className="dashboard-search-band">
-            <div className="dashboard-search">
-              <Search size={18} strokeWidth={2.4} />
-              <input
-                value={query}
-                onChange={(event) => onQueryChange(event.currentTarget.value)}
-                placeholder={openFolder ? "Search in folder" : "Search projects"}
-                aria-label={openFolder ? "Search in folder" : "Search projects"}
-              />
-            </div>
-            {!openFolder ? (
-              <button
-                className="dashboard-secondary"
-                type="button"
-                onClick={() => {
-                  closeMenus();
-                  setFolderCreateOpen(true);
-                  setNameDraft(`Folder ${folders.length + 1}`);
-                }}
-              >
-                <FolderPlus size={18} strokeWidth={2.4} />
-                <span>New folder</span>
-              </button>
-            ) : null}
-            <button className="dashboard-primary" type="button" onClick={onCreate}>
-              <Plus size={20} strokeWidth={2.6} />
-              <span>Create</span>
-            </button>
-          </div>
           {dashboardNotice ? (
             <div className="dashboard-import-notice" role="status">
               {dashboardNotice}
@@ -2446,16 +2796,24 @@ function Dashboard({
                   <span>
                     {projectVisibleCount === 0
                       ? "0 projects"
-                      : `${projectPageStart}-${projectPageEnd} of ${projectVisibleCount}`}
+                      : `${projectVisibleCount} ${projectVisibleCount === 1 ? "project" : "projects"}`}
                   </span>
                 </div>
               ) : (
                 <>
-                  <h1>Projects</h1>
+                  <h1>{normalizedQuery ? "Search" : "Projects"}</h1>
                   <span>
-                    {folderCount + rootProjects.length === 0
-                      ? "0 items"
-                      : `${folderCount} ${folderCount === 1 ? "folder" : "folders"} · ${rootProjects.length} ${rootProjects.length === 1 ? "project" : "projects"}`}
+                    {normalizedQuery
+                      ? folderCount + rootProjects.length === 0
+                        ? "0 matches"
+                        : `${rootProjects.length} ${rootProjects.length === 1 ? "design" : "designs"}${
+                            folderCount > 0 ? ` · ${folderCount} ${folderCount === 1 ? "folder" : "folders"}` : ""
+                          }`
+                      : projects.length === 0 && folderCount === 0
+                        ? "0 items"
+                        : `${projects.length} ${projects.length === 1 ? "design" : "designs"}${
+                            folderCount > 0 ? ` · ${folderCount} ${folderCount === 1 ? "folder" : "folders"}` : ""
+                          }`}
                   </span>
                 </>
               )}
@@ -2464,7 +2822,7 @@ function Dashboard({
               <label className="dashboard-select">
                 <SlidersHorizontal size={17} />
                 <select value={sortMode} onChange={(event) => onSortModeChange(event.currentTarget.value)} aria-label="Sort projects">
-                  <option value="custom">Arrangement</option>
+                  <option value="custom">Custom order</option>
                   <option value="recent">Recent</option>
                   <option value="name">Name</option>
                 </select>
@@ -2489,14 +2847,9 @@ function Dashboard({
               ) : null}
               {folderMembers.length > 0 ? (
                 <div className="dashboard-home-section dashboard-home-section-folder">
-                  {renderCarousel({
-                    ariaLabel: `${openFolder.name} pages`,
-                    pages: folderMemberPages,
-                    safePage: safeProjectPage,
-                    variant: "projects",
-                    renderItem: (project) => renderProjectCard(project, { inFolder: openFolder }),
-                  })}
-                  {projectPagination ?? <div className="project-pagination-spacer" aria-hidden="true" />}
+                  <div className={libraryGridClass} aria-label={`${openFolder.name} projects`}>
+                    {folderMembers.map((project) => renderProjectCard(project, { inFolder: openFolder }))}
+                  </div>
                 </div>
               ) : (
                 <div className="project-empty">
@@ -2507,55 +2860,66 @@ function Dashboard({
             </>
           ) : (
             <div className="dashboard-home-sections">
-              {occupiedFolders.length > 0 ? (
-                <section className="dashboard-home-section" aria-label="Folders">
+              {recentProjects.length > 0 ? (
+                <section className="dashboard-home-section" aria-label="Recents">
                   <div className="dashboard-subsection-header">
-                    <h2>Folders</h2>
-                    <span>
-                      {folderCount === 0 ? "0 folders" : `${folderPageStart}-${folderPageEnd} of ${folderCount}`}
-                    </span>
+                    <h2>Recents</h2>
                   </div>
-                  {renderCarousel({
-                    ariaLabel: "Folder pages",
-                    pages: rootFolderPages,
-                    safePage: safeFolderPage,
-                    variant: "folders",
-                    renderItem: (folder) => renderFolderCard(folder),
-                  })}
-                  {folderPagination ?? <div className="project-pagination-spacer" aria-hidden="true" />}
+                  <div className={libraryGridClass} aria-label="Recent designs">
+                    {recentProjects.map((project) => renderProjectCard(project, { recent: true }))}
+                  </div>
                 </section>
               ) : null}
 
-              <section className="dashboard-home-section" aria-label="Projects">
-                {projectVisibleCount > 0 ? (
-                  <div className="dashboard-subsection-header">
+              {rootFolders.length > 0 || libraryProjects.length > 0 ? (
+                <section className="dashboard-home-section" aria-label={normalizedQuery ? "Results" : "Library"}>
+                  {rootFolders.length > 0 ? (
+                    <div className="library-band">
+                      <div className="dashboard-subsection-header">
+                        <h2>Folders</h2>
+                        <span>
+                          {folderCount} {folderCount === 1 ? "folder" : "folders"}
+                        </span>
+                      </div>
+                      <div className={`${libraryGridClass} project-grid-folders`} aria-label="Folders">
+                        {rootFolders.map((folder) => renderFolderCard(folder))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {rootFolders.length > 0 && libraryProjects.length > 0 ? (
+                    <div className="library-band-rule" role="separator" aria-hidden="true" />
+                  ) : null}
+                  {libraryProjects.length > 0 ? (
+                    <div className="library-band">
+                      <div className="dashboard-subsection-header">
+                        <h2>Designs</h2>
+                        <span>
+                          {libraryProjects.length} {libraryProjects.length === 1 ? "design" : "designs"}
+                        </span>
+                      </div>
+                      <div className={`${libraryGridClass} project-grid-projects`} aria-label="Designs">
+                        {libraryProjects.map((project) => renderProjectCard(project))}
+                      </div>
+                    </div>
+                  ) : null}
+                </section>
+              ) : recentProjects.length === 0 ? (
+                <section className="dashboard-home-section" aria-label="Library">
+                  <div className="project-empty">
+                    <strong>{normalizedQuery ? "No matches" : "No designs yet"}</strong>
                     <span>
-                      {`${projectPageStart}-${projectPageEnd} of ${projectVisibleCount}`}
+                      {normalizedQuery
+                        ? "Try a different name, or create a new design."
+                        : "Start with a sample, or create a blank design."}
                     </span>
+                    {!normalizedQuery ? (
+                      <button className="dashboard-secondary" type="button" onClick={onCreateIntro}>
+                        Try {INTRO_PROJECT_NAME}
+                      </button>
+                    ) : null}
                   </div>
-                ) : null}
-                {rootProjects.length > 0 ? (
-                  <>
-                    {renderCarousel({
-                      ariaLabel: "Project pages",
-                      pages: rootProjectPages,
-                      safePage: safeProjectPage,
-                      variant: "projects",
-                      renderItem: (project) => renderProjectCard(project),
-                    })}
-                    {projectPagination ?? <div className="project-pagination-spacer" aria-hidden="true" />}
-                  </>
-                ) : (
-                  <div className="project-empty project-empty-carousel">
-                    <strong>{occupiedFolders.length > 0 ? "No loose projects" : "No projects yet"}</strong>
-                    <span>
-                      {occupiedFolders.length > 0
-                        ? "Create a project or open a folder above."
-                        : "Create a 3D design or a folder and it will appear here."}
-                    </span>
-                  </div>
-                )}
-              </section>
+                </section>
+              ) : null}
             </div>
           )}
         </section>
@@ -2572,6 +2936,9 @@ function Dashboard({
             </header>
             <p>
               Do you actually want the project <span>{projectPendingDelete.name}</span> to be deleted?
+              {projectPendingDelete.filePath
+                ? ` The file ${peakcadBasename(projectPendingDelete.filePath)} stays on disk.`
+                : ""}
             </p>
             <div className="dashboard-confirm-actions">
               <button className="dashboard-confirm-cancel" type="button" onClick={() => setProjectPendingDeleteId(null)}>
@@ -2862,10 +3229,7 @@ function ProjectPreview({
           onError={() => setFailedThumbnailUrl(resolvedThumbnailUrl ?? null)}
         />
       ) : (
-        <>
-          <span className="preview-grid" />
-          <span className="preview-empty-mark">No snapshot yet</span>
-        </>
+        <span className="preview-grid" />
       )}
     </span>
   );

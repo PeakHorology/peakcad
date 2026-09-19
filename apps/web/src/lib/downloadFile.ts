@@ -44,9 +44,16 @@ async function saveToFolder(filename: string, content: string, encoding?: "base6
 }
 
 export async function downloadTextFile(filename: string, content: string, type: string): Promise<DownloadResult> {
-  const folderResult = await saveToFolder(filename, content);
-  if (folderResult.mode === "folder") {
-    return folderResult;
+  const folder = typeof window !== "undefined"
+    ? window.localStorage.getItem(DOWNLOAD_FOLDER_STORAGE_KEY)?.trim() ?? ""
+    : "";
+  // Start the <a download> in the same turn as the click whenever possible.
+  // Awaiting IndexedDB/fetch first can drop the user gesture and silently block the file.
+  if (!STATIC_EXPORT_BUILD && folder) {
+    const folderResult = await saveToFolder(filename, content);
+    if (folderResult.mode === "folder") {
+      return folderResult;
+    }
   }
   triggerBrowserDownload(filename, content, type);
   return { mode: "browser" };

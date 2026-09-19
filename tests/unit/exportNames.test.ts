@@ -17,4 +17,12 @@ describe("project export filenames", () => {
   it("falls back to a useful name when the project name cannot be used", () => {
     expect(projectExportFileName("...", "obj")).toBe("PeakCAD design.obj");
   });
+
+  it("sidesteps Windows reserved device names", () => {
+    expect(projectExportFileName("CON", "stl")).toBe("CON-design.stl");
+    expect(projectExportFileName("nul", "step")).toBe("nul-design.step");
+    expect(projectExportFileName("COM1", "3mf")).toBe("COM1-design.3mf");
+    // Only exact matches are reserved.
+    expect(projectExportFileName("Console", "stl")).toBe("Console.stl");
+  });
 });

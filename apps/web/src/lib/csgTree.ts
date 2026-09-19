@@ -60,6 +60,24 @@ function hasUsableImportedMesh(shape: WorkplaneShape): boolean {
   return Boolean(shape.importedMesh && shape.importedMesh.positions.length >= 9);
 }
 
+export function hasUsableCsgResultMesh(shape: WorkplaneShape): boolean {
+  return hasUsableImportedMesh(shape);
+}
+
+/**
+ * Children the viewport may draw for a group. Cutters stay in the feature tree
+ * for Ungroup / inspect, but they must never appear in the scene after Group.
+ */
+export function viewportGroupChildren(shape: WorkplaneShape): WorkplaneShape[] {
+  if (hasUsableImportedMesh(shape)) return [];
+  return (shape.groupedShapes ?? []).filter((child) => (
+    !child.hidden
+    && !child.suppressed
+    && !child.csg?.suppressed
+    && !child.hole
+  ));
+}
+
 /**
  * Whether Group / Intersection should flatten this body into live children.
  * A baked subtract/union/intersect is a finished solid: inner holes must not
@@ -73,6 +91,41 @@ export function shouldExpandGroupForBoolean(shape: WorkplaneShape): boolean {
     return false;
   }
   return !hasUsableImportedMesh(shape);
+}
+
+/**
+ * Flatten assemblies (and empty CSG caches) recursively so a Group of Groups
+ * participates as its sealed bodies — not as a leftover local-frame nest.
+ */
+export function expandBooleanOperands(
+  selection: WorkplaneShape[],
+  restore: (shape: WorkplaneShape) => WorkplaneShape[],
+): WorkplaneShape[] {
+  const out: WorkplaneShape[] = [];
+  const seen = new Set<string>();
+  const visit = (shape: WorkplaneShape) => {
+    if (shape.suppressed || shape.csg?.suppressed) return;
+    if (seen.has(shape.id)) return;
+    seen.add(shape.id);
+    if (shouldExpandGroupForBoolean(shape)) {
+      restore(shape).forEach(visit);
+      return;
+    }
+    out.push(shape);
+  };
+  selection.forEach(visit);
+  return out;
+}
+
+/** Last-selected group id so Ungroup peels one nested Group at a time. */
+export function pickGroupToUngroup(selectedIds: string[], groupIds: string[]): string | null {
+  if (groupIds.length === 0) return null;
+  const nested = new Set(groupIds);
+  for (let index = selectedIds.length - 1; index >= 0; index -= 1) {
+    const id = selectedIds[index];
+    if (nested.has(id)) return id;
+  }
+  return groupIds[groupIds.length - 1] ?? null;
 }
 
 /**
@@ -129,12 +182,18 @@ export type BooleanCleanupOptions = {
    * loss. Defaults to off so an unmapped caller keeps its true geometry.
    */
   staggeredUnion?: boolean;
+  /**
+   * Looser weld for leftover coplanar seams after a solid-only union (knurls, radial hubs).
+   * Does not planarize, so stepped unions keep their real height.
+   */
+  unifyCoplanar?: boolean;
 };
 
 /**
  * Weld near-duplicates and drop degenerate triangles after a boolean.
  * With `staggeredUnion`, also erases the radial-hub coplanar "crease" scars that the
- * elevation stagger leaves behind on dense unions.
+ * elevation stagger leaves behind on dense unions. `unifyCoplanar` only loosens the
+ * weld so leftover same-plane seams fuse — it does not flatten real steps.
  */
 export function cleanupBooleanPositions(
   positions: number[],
@@ -144,9 +203,10 @@ export function cleanupBooleanPositions(
   if (positions.length < 9) return positions;
 
   const staggeredUnion = options.staggeredUnion === true;
+  const unifyCoplanar = options.unifyCoplanar === true;
   const estimatedTris = Math.floor(positions.length / 9);
   const dense = estimatedTris >= DENSE_UNION_TRIANGLE_THRESHOLD;
-  const tol = staggeredUnion && dense
+  const tol = (staggeredUnion && dense) || unifyCoplanar
     ? Math.max(weldTolerance, DENSE_UNION_WELD_TOLERANCE)
     : weldTolerance;
 
@@ -385,4 +445,80 @@ export function setCsgChildSuppressed(
 
 export function isShapeSuppressed(shape: WorkplaneShape): boolean {
   return Boolean(shape.suppressed || shape.csg?.suppressed);
+}
+
+const COPLANAR_EDGE_DOT = 0.99;
+const DISPLAY_EDGE_SNAP = 0.08;
+
+function quantizeDisplayVertex(x: number, y: number, z: number) {
+  const q = 1 / DISPLAY_EDGE_SNAP;
+  return `${Math.round(x * q)},${Math.round(y * q)},${Math.round(z * q)}`;
+}
+
+function undirectedDisplayEdgeKey(a: string, b: string) {
+  return a < b ? `${a}|${b}` : `${b}|${a}`;
+}
+
+type MeshEdgeRecord = { nx: number; ny: number; nz: number; sharp: boolean };
+
+/**
+ * Drop leftover same-plane splits (the diametric knurl seam) while keeping
+ * real creases — rim teeth, steps, and hole walls.
+ */
+export function filterCoplanarDisplayEdges(
+  edges: Array<{ points: number[] }>,
+  meshPositions: ArrayLike<number>,
+): Array<{ points: number[] }> {
+  if (edges.length === 0 || meshPositions.length < 9) return edges;
+
+  const records = new Map<string, MeshEdgeRecord>();
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const ab = new THREE.Vector3();
+  const ac = new THREE.Vector3();
+  const normal = new THREE.Vector3();
+
+  const markTriangle = (ia: number, ib: number, ic: number) => {
+    a.fromArray(meshPositions as number[], ia);
+    b.fromArray(meshPositions as number[], ib);
+    c.fromArray(meshPositions as number[], ic);
+    ab.subVectors(b, a);
+    ac.subVectors(c, a);
+    normal.copy(ab).cross(ac);
+    if (normal.lengthSq() <= 1e-14) return;
+    normal.normalize();
+    const keys = [
+      quantizeDisplayVertex(a.x, a.y, a.z),
+      quantizeDisplayVertex(b.x, b.y, b.z),
+      quantizeDisplayVertex(c.x, c.y, c.z),
+    ];
+    for (let i = 0; i < 3; i += 1) {
+      const edgeKey = undirectedDisplayEdgeKey(keys[i], keys[(i + 1) % 3]);
+      const prev = records.get(edgeKey);
+      if (!prev) {
+        records.set(edgeKey, { nx: normal.x, ny: normal.y, nz: normal.z, sharp: false });
+        continue;
+      }
+      const dot = Math.abs(prev.nx * normal.x + prev.ny * normal.y + prev.nz * normal.z);
+      if (dot < COPLANAR_EDGE_DOT) prev.sharp = true;
+    }
+  };
+
+  for (let i = 0; i + 8 < meshPositions.length; i += 9) {
+    markTriangle(i, i + 3, i + 6);
+  }
+
+  return edges.filter((edge) => {
+    if (edge.points.length < 6) return false;
+    for (let i = 0; i + 5 < edge.points.length; i += 3) {
+      const aKey = quantizeDisplayVertex(edge.points[i], edge.points[i + 1], edge.points[i + 2]);
+      const bKey = quantizeDisplayVertex(edge.points[i + 3], edge.points[i + 4], edge.points[i + 5]);
+      if (aKey === bKey) continue;
+      const record = records.get(undirectedDisplayEdgeKey(aKey, bKey));
+      if (!record) continue;
+      if (record.sharp) return true;
+    }
+    return false;
+  });
 }

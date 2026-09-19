@@ -1,6 +1,7 @@
 services:
-  sketchforge:
-    image: ghcr.io/formsmith746/sketchforge-3d:latest
+  peakcad:
+    # Override with PEAKCAD_IMAGE=ghcr.io/<owner>/<repo>:latest to match your GHCR push.
+    image: ${PEAKCAD_IMAGE:-ghcr.io/peakhorology/peakcad:latest}
     ports:
-      - "${SKETCHFORGE_PORT:-3000}:80"
+      - "${PEAKCAD_PORT:-3000}:80"
     restart: unless-stopped

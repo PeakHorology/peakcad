@@ -41,9 +41,12 @@ describe("matchHotkeyAction", () => {
     expect(matchHotkeyAction(keyEvent({ key: "h" }), DEFAULT_HOTKEY_BINDINGS)).toBe("holeMode");
   });
 
-  it("ignores shift for nudge / raise so Shift still acts as a step multiplier", () => {
-    expect(matchHotkeyAction(keyEvent({ key: "ArrowLeft", shiftKey: true }), DEFAULT_HOTKEY_BINDINGS)).toBe("nudgeLeft");
-    expect(matchHotkeyAction(keyEvent({ key: "ArrowUp", ctrlKey: true, shiftKey: true }), DEFAULT_HOTKEY_BINDINGS)).toBe("raise");
+  it("lets L and D mean geometry tools unless Sketch is preferred", () => {
+    const bindings = DEFAULT_HOTKEY_BINDINGS;
+    expect(matchHotkeyAction(keyEvent({ key: "l" }), bindings)).toBe("align");
+    expect(matchHotkeyAction(keyEvent({ key: "d" }), bindings)).toBe("dropToWorkplane");
+    expect(matchHotkeyAction(keyEvent({ key: "l" }), bindings, undefined, { preferCategory: "Sketch" })).toBe("sketchLine");
+    expect(matchHotkeyAction(keyEvent({ key: "d" }), bindings, undefined, { preferCategory: "Sketch" })).toBe("sketchDimension");
   });
 });
 
@@ -55,6 +58,15 @@ describe("setHotkeyBinding", () => {
     expect(matchHotkeyAction(keyEvent({ key: "m" }), next)).toBe("pattern");
     expect(next.mirror).toEqual([]);
     expect(findHotkeyConflict(next, "pattern", eventToChord(keyEvent({ key: "m" })))).toBeNull();
+  });
+
+  it("lets Sketch line and Align share L across modes", () => {
+    expect(findHotkeyConflict(DEFAULT_HOTKEY_BINDINGS, "align", eventToChord(keyEvent({ key: "l" })))).toBeNull();
+    expect(findHotkeyConflict(DEFAULT_HOTKEY_BINDINGS, "sketchLine", eventToChord(keyEvent({ key: "l" })))).toBeNull();
+    const next = setHotkeyBinding(DEFAULT_HOTKEY_BINDINGS, "align", [eventToChord(keyEvent({ key: "l" }))], {
+      clearConflicts: true,
+    });
+    expect(next.sketchLine).toEqual(DEFAULT_HOTKEY_BINDINGS.sketchLine);
   });
 });
 

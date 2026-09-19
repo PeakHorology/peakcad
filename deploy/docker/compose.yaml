@@ -1,9 +1,9 @@
 services:
-  sketchforge:
-    image: sketchforge:local
+  peakcad:
+    image: peakcad:local
     build:
       context: ../..
       dockerfile: deploy/docker/Dockerfile
     ports:
-      - "${SKETCHFORGE_PORT:-3000}:80"
+      - "${PEAKCAD_PORT:-3000}:80"
     restart: unless-stopped

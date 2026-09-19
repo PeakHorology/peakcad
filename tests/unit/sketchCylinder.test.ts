@@ -99,4 +99,28 @@ describe("sketchCylinder UV", () => {
     const pos = prism?.getAttribute("position");
     expect(pos && pos.count).toBeGreaterThan(8);
   });
+
+  it("wraps nested UV loops (outer + hole) into an annular radial prism", () => {
+    const surface = cylinderSurfaceFromHit(cylinder(), { x: 10, y: 20, z: 0 });
+    expect(surface).not.toBeNull();
+    if (!surface) return;
+    const outer = [
+      { x: -6, z: -6 },
+      { x: 6, z: -6 },
+      { x: 6, z: 6 },
+      { x: -6, z: 6 },
+    ];
+    const hole = [
+      { x: -2, z: -2 },
+      { x: 2, z: -2 },
+      { x: 2, z: 2 },
+      { x: -2, z: 2 },
+    ];
+    const annular = wrapUvLoopRadialPrism(outer, surface, 10, true, [hole]);
+    expect(annular).not.toBeNull();
+    const pos = annular?.getAttribute("position");
+    const solid = wrapUvLoopRadialPrism(outer, surface, 10, true);
+    const solidPos = solid?.getAttribute("position");
+    expect(pos && solidPos && pos.count).toBeGreaterThan(solidPos.count);
+  });
 });

@@ -136,6 +136,7 @@ function EdgeModifierSlider({
 
 export function EdgeModifierPanel({
   kind,
+  editing = false,
   amount,
   maxAmount,
   chamferAngle,
@@ -167,6 +168,7 @@ export function EdgeModifierPanel({
   onCancel,
 }: {
   kind: CadModifierKind;
+  editing?: boolean;
   amount: number;
   maxAmount: number;
   chamferAngle: number;
@@ -198,7 +200,9 @@ export function EdgeModifierPanel({
   onCancel: () => void;
 }) {
   const [historyOpen, setHistoryOpen] = useState(false);
-  const title = kind === "fillet" ? "Fillet edges" : "Chamfer edges";
+  const title = editing
+    ? (kind === "fillet" ? "Edit fillet" : "Edit chamfer")
+    : (kind === "fillet" ? "Fillet edges" : "Chamfer edges");
   const amountMin = Math.min(MIN_EDGE_MODIFIER_AMOUNT, Math.max(Number.EPSILON, maxAmount));
   const amountMax = Math.max(amountMin, maxAmount);
   return (
@@ -217,7 +221,11 @@ export function EdgeModifierPanel({
       </div>
 
       <div className="edge-modifier-selection-help">
-        {prepared ? "Click highlighted model edges to toggle them. Hold Shift to add or remove a single edge." : "Loading CAD edge data from the local worker."}
+        {prepared
+          ? (editing
+            ? "The previous edges and size are loaded. Adjust them, then Update."
+            : "Click highlighted model edges to toggle them. Hold Shift to add or remove a single edge.")
+          : "Loading CAD edge data from the local worker."}
       </div>
 
       <div className="edge-modifier-quick-actions">
@@ -298,7 +306,7 @@ export function EdgeModifierPanel({
         <button type="button" className="secondary" onClick={onCancel}>Cancel</button>
         <button type="button" className="primary" disabled={!prepared || busy || selectedCount === 0 || Boolean(error)} onClick={onApply}>
           {busy ? <LoaderCircle className="edge-modifier-spinner" size={17} /> : <Check size={17} />}
-          Apply
+          {editing ? "Update" : "Apply"}
         </button>
       </div>
     </aside>

@@ -4,11 +4,21 @@ import {
   canonicalizeShape,
   cleanNearZero,
   cleanRotationDegrees,
+  coneBaseRadius,
+  coneMaxRadius,
+  conePatchForFootprint,
+  conePatchForRadii,
+  coneTopRadius,
+  roofPatchForFootprint,
+  roofPatchForHeight,
+  coneUnitBaseScale,
+  coneUnitTopScale,
   fallbackSolidColor,
   mirroredAxisCount,
   mirrorSign,
   normalizeDegrees,
   proportionalResizeScale,
+  groupedChildrenDisplayScale,
   preservesEdgeTreatmentSize,
   resizedImportedCoordinates,
   resizedImportedMeshPositions,
@@ -57,6 +67,23 @@ describe("workplane shape helpers", () => {
     expect(shapeWidth(base)).toBe(18);
     expect(shapeDepth(base)).toBe(24);
     expect(resizedShapeSize(18, 24)).toBe(24);
+  });
+
+  it("does not shrink patterned group children to a wrapper AABB", () => {
+    const grouped = shape({
+      width: 80,
+      depth: 80,
+      height: 10,
+      groupedBaseWidth: 80,
+      groupedBaseDepth: 80,
+      groupedBaseHeight: 10,
+    });
+    expect(groupedChildrenDisplayScale(grouped)).toEqual({ x: 1, y: 1, z: 1 });
+    expect(groupedChildrenDisplayScale({ ...grouped, width: 40, depth: 40, height: 5 })).toEqual({
+      x: 0.5,
+      y: 0.5,
+      z: 0.5,
+    });
   });
 
   it("uses proportional scale instead of square dimensions while shift-resizing", () => {
@@ -187,5 +214,131 @@ describe("workplane shape helpers", () => {
 
     expect(preservesEdgeTreatmentSize(grouped)).toBe(true);
     expect(resizedImportedMeshPositions(grouped)).toEqual([-20, 0, 0, -18, 2, 0, 18, 38, 0, 20, 40, 0]);
+  });
+
+  it("expands overall cone footprint when a radius outgrows Length/Width", () => {
+    const cone = shape({
+      kind: "cone",
+      width: 28,
+      depth: 28,
+      size: 28,
+      height: 40,
+      baseRadius: 14,
+      topRadius: 5,
+    });
+    expect(coneMaxRadius(cone)).toBe(14);
+    expect(coneUnitBaseScale(cone)).toBeCloseTo(1, 5);
+    expect(coneUnitTopScale(cone)).toBeCloseTo(5 / 14, 5);
+
+    const grown = conePatchForRadii(cone, 20, 14);
+    expect(grown.topRadius).toBe(20);
+    expect(grown.baseRadius).toBe(14);
+    expect(grown.width).toBeCloseTo(40, 5);
+    expect(grown.depth).toBeCloseTo(40, 5);
+  });
+
+  it("shrinks overall cone footprint when the larger radius is reduced", () => {
+    const cone = shape({
+      kind: "cone",
+      width: 64.5,
+      depth: 64.5,
+      size: 64.5,
+      height: 2,
+      baseRadius: 31,
+      topRadius: 32.25,
+    });
+    const shrunk = conePatchForRadii(cone, 20, 31);
+    expect(shrunk.topRadius).toBe(20);
+    expect(shrunk.baseRadius).toBe(31);
+    expect(shrunk.width).toBeCloseTo(62, 5);
+    expect(shrunk.depth).toBeCloseTo(62, 5);
+  });
+
+  it("scales both cone radii when overall footprint changes", () => {
+    const cone = shape({
+      kind: "cone",
+      width: 40,
+      depth: 40,
+      size: 40,
+      height: 40,
+      baseRadius: 14,
+      topRadius: 20,
+    });
+    const scaled = conePatchForFootprint(cone, 80, 80);
+    expect(scaled.width).toBe(80);
+    expect(scaled.depth).toBe(80);
+    expect(scaled.baseRadius).toBeCloseTo(28, 5);
+    expect(scaled.topRadius).toBeCloseTo(40, 5);
+  });
+
+  it("scales cone radii from a single-axis footprint edit", () => {
+    const cone = shape({
+      kind: "cone",
+      width: 40,
+      depth: 40,
+      size: 40,
+      height: 40,
+      baseRadius: 14,
+      topRadius: 20,
+    });
+    const scaled = conePatchForFootprint(cone, 60, 40);
+    expect(scaled.width).toBe(60);
+    expect(scaled.depth).toBe(40);
+    expect(scaled.baseRadius).toBeCloseTo(21, 5);
+    expect(scaled.topRadius).toBeCloseTo(30, 5);
+  });
+
+  it("scales a triangle height with width so the base angles stay put", () => {
+    const triangle = shape({
+      kind: "roof",
+      width: 40,
+      depth: 24,
+      size: 40,
+      height: 20,
+      leftAngle: 45,
+      rightAngle: 45,
+    });
+    const scaled = roofPatchForFootprint(triangle, 80, 24);
+    expect(scaled.width).toBe(80);
+    expect(scaled.depth).toBe(24);
+    expect(scaled.height).toBeCloseTo(40, 5);
+    expect(scaled.leftAngle).toBe(45);
+    expect(scaled.rightAngle).toBe(45);
+  });
+
+  it("scales a triangle base with height so the silhouette stays similar", () => {
+    const triangle = shape({
+      kind: "roof",
+      width: 40,
+      depth: 24,
+      size: 40,
+      height: 20,
+      leftAngle: 30,
+      rightAngle: 60,
+    });
+    const scaled = roofPatchForHeight(triangle, 40);
+    expect(scaled.height).toBe(40);
+    expect(scaled.width).toBeCloseTo(80, 5);
+    expect(scaled.depth).toBe(24);
+    expect(scaled.leftAngle).toBe(30);
+    expect(scaled.rightAngle).toBe(60);
+  });
+
+  it("does not change triangle height when only extrusion length changes", () => {
+    const triangle = shape({
+      kind: "roof",
+      width: 40,
+      depth: 24,
+      size: 40,
+      height: 20,
+      leftAngle: 45,
+      rightAngle: 45,
+    });
+    const scaled = roofPatchForFootprint(triangle, 40, 48);
+    expect(scaled.width).toBe(40);
+    expect(scaled.depth).toBe(48);
+    expect(scaled.height).toBeCloseTo(20, 5);
+    expect(scaled.leftAngle).toBe(45);
+    expect(scaled.rightAngle).toBe(45);
   });
 });

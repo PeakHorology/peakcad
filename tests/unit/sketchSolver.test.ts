@@ -57,3 +57,61 @@ describe("sketch solver", () => {
     expect(Math.abs(left.z - right.z)).toBeLessThan(0.2);
   });
 });
+
+function docWithDimensionedLine(startAt: { x: number; z: number }, endAt: { x: number; z: number }, value: number) {
+  const doc = createEmptySketchDoc(defaultSketchPlane());
+  doc.entities = [
+    { kind: "point", id: "p0", x: startAt.x, z: startAt.z },
+    { kind: "point", id: "p1", x: endAt.x, z: endAt.z },
+    { kind: "line", id: "l0", startId: "p0", endId: "p1" },
+  ];
+  doc.dimensions = [
+    { id: "d0", kind: "linear", entityIds: ["l0"], value, driving: true },
+  ];
+  return doc;
+}
+
+function solvedLineLength(doc: ReturnType<typeof docWithDimensionedLine>, iterations = 80) {
+  const solved = solveSketchDoc(doc, iterations);
+  const a = solved.doc.entities.find((e) => e.id === "p0");
+  const b = solved.doc.entities.find((e) => e.id === "p1");
+  if (!a || a.kind !== "point" || !b || b.kind !== "point") throw new Error("missing endpoints");
+  return { length: Math.hypot(b.x - a.x, b.z - a.z), result: solved };
+}
+
+describe("driving linear dimensions", () => {
+  it("drives an ordinary line to its dimension", () => {
+    const { length } = solvedLineLength(docWithDimensionedLine({ x: 0, z: 0 }, { x: 20, z: 0 }, 32));
+    expect(length).toBeCloseTo(32, 6);
+  });
+
+  it("grows a collapsed line instead of silently leaving it at zero", () => {
+    // Both endpoints coincide, so there is no direction to scale: the dimension used to
+    // report zero error while the line stayed at length 0.
+    const { length, result } = solvedLineLength(docWithDimensionedLine({ x: 4, z: 4 }, { x: 4, z: 4 }, 12));
+    expect(length).toBeCloseTo(12, 6);
+    expect(result.status).not.toBe("unsolved");
+  });
+
+  it("drives a diagonal line without changing its direction", () => {
+    const { length } = solvedLineLength(docWithDimensionedLine({ x: 0, z: 0 }, { x: 3, z: 4 }, 10));
+    expect(length).toBeCloseTo(10, 6);
+  });
+
+  it("reports 'unsolved' when an abandoned dimension hides behind spare degrees of freedom", () => {
+    // p0/p1 are pinned 20mm apart, so the 50mm dimension is unreachable. Loose geometry
+    // elsewhere keeps the sketch under-constrained overall, which is precisely the case the
+    // old check missed: it only looked for conflicts once removed >= totalVars, so this
+    // reported a clean "under-defined" while the dimension was silently abandoned.
+    const doc = docWithDimensionedLine({ x: 0, z: 0 }, { x: 20, z: 0 }, 50);
+    doc.entities.push(
+      { kind: "point", id: "loose0", x: 40, z: 5 },
+      { kind: "point", id: "loose1", x: 45, z: 9 },
+    );
+    const pinned = addConstraints(doc, [{ kind: "fix", entityIds: ["p0"] }, { kind: "fix", entityIds: ["p1"] }]);
+    const solved = solveSketchDoc(pinned, 80);
+
+    expect(solved.status).toBe("unsolved");
+    expect(solved.conflicts).toContain("d0");
+  });
+});

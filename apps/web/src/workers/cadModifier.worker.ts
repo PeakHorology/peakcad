@@ -12,12 +12,17 @@ import type {
   CadModifierWorkerRequest,
   CadModifierWorkerResponse,
 } from "@/lib/cadModifierTypes";
+import {
+  isDisplayCadEdge,
+  isModifierDisplayCadEdge,
+  isSelectableModifierEdge,
+  recoveredHoleRimClassification,
+  treatmentDetailFaceAreaLimit,
+} from "@/lib/cadModifierEdges";
 import { inferThreadSideFromFace, resolveThreadParams, type ResolvedThreadParams } from "@/lib/metricThreads";
 
 const HASH_UPPER_BOUND = 2_147_483_647;
 const CAD_EDGE_WIREFRAME_DEFLECTION = 0.035;
-const CAD_DISPLAY_EDGE_MIN_ANGLE = 0.75;
-const CURVED_SURFACE_TYPES = new Set(["cylinder", "cone", "sphere", "torus", "bspline", "bezier", "offset", "revolution", "extrusion"]);
 /**
  * Staged public OCCT runtime. Keep this constant local so the worker never imports
  * `@/lib/cadModifierRuntime` (that module evaluates hardwareProfile at load time and
@@ -117,22 +122,31 @@ function parseEdgeFaceMap(values: number[]) {
   return map;
 }
 
+function edgeAngleSampleOffsets(pointCount: number) {
+  const last = Math.max(0, pointCount - 3);
+  const mid = Math.max(0, Math.floor(pointCount / 6) * 3);
+  const quarter = Math.max(0, Math.floor(pointCount / 12) * 3);
+  return [...new Set([mid, quarter, 0, last])];
+}
+
 function edgeAngle(cad: OcctKernel, points: number[], faceHashes: number[], faceByHash: Map<number, ShapeHandle>) {
   if (faceHashes.length !== 2 || points.length < 6) return { angle: 0, boundary: faceHashes.length < 2, manifold: false };
-  const offset = Math.max(0, Math.floor(points.length / 6) * 3);
-  const point = { x: points[offset], y: points[offset + 1], z: points[offset + 2] };
   const faceA = faceByHash.get(faceHashes[0]);
   const faceB = faceByHash.get(faceHashes[1]);
   if (faceA === undefined || faceB === undefined) return { angle: 0, boundary: false, manifold: false };
-  try {
-    const a = orientedFaceNormal(cad, faceA, point);
-    const b = orientedFaceNormal(cad, faceB, point);
-    const dot = Math.max(-1, Math.min(1, a.x * b.x + a.y * b.y + a.z * b.z));
-    const rawAngle = (Math.acos(dot) * 180) / Math.PI;
-    return { angle: Math.min(rawAngle, 180 - rawAngle), boundary: false, manifold: true };
-  } catch {
-    return { angle: 0, boundary: false, manifold: false };
+  for (const offset of edgeAngleSampleOffsets(points.length)) {
+    const point = { x: points[offset], y: points[offset + 1], z: points[offset + 2] };
+    try {
+      const a = orientedFaceNormal(cad, faceA, point);
+      const b = orientedFaceNormal(cad, faceB, point);
+      const dot = Math.max(-1, Math.min(1, a.x * b.x + a.y * b.y + a.z * b.z));
+      const rawAngle = (Math.acos(dot) * 180) / Math.PI;
+      return { angle: Math.min(rawAngle, 180 - rawAngle), boundary: false, manifold: true };
+    } catch {
+      // Closed circular edges often fail UV projection at the seam; try another sample.
+    }
   }
+  return { angle: 0, boundary: false, manifold: false };
 }
 
 function meshPartToAsciiStl(part: CadModifierMeshPart) {
@@ -310,30 +324,16 @@ function reconstructParts(cad: OcctKernel, parts: CadModifierMeshPart[]) {
   return result;
 }
 
-function isDisplayCadEdge(edge: CollectedCadEdgeGeometry) {
-  if (!edge.manifold || edge.boundary || edge.points.length < 6) return false;
-  const effectiveAngle = Math.min(edge.angle, 180 - edge.angle);
-  const touchesCurvedSurface = edge.surfaceTypes.some((surfaceType) => CURVED_SURFACE_TYPES.has(surfaceType));
-  const isCurvedEdge = edge.curveType !== "line";
-  return effectiveAngle + 1e-3 >= CAD_DISPLAY_EDGE_MIN_ANGLE || touchesCurvedSurface || isCurvedEdge;
-}
-
-function treatmentDetailFaceAreaLimit(faceAreas: number[]) {
-  const finiteAreas = faceAreas.filter((area) => Number.isFinite(area) && area > 1e-8);
-  if (finiteAreas.length === 0) return 0;
-  return Math.max(1e-8, Math.max(...finiteAreas) * 0.3);
-}
-
-function touchesTreatmentDetailFace(edge: CollectedCadEdgeGeometry, areaLimit: number) {
-  return areaLimit > 0 && edge.faceAreas.some((area) => area > 0 && area <= areaLimit);
-}
-
-function isModifierDisplayCadEdge(edge: CollectedCadEdgeGeometry, treatmentAreaLimit: number) {
-  return isDisplayCadEdge(edge) && !touchesTreatmentDetailFace(edge, treatmentAreaLimit);
-}
-
-function isSelectableModifierEdge(edge: CollectedCadEdgeGeometry) {
-  return edge.manifold && !edge.boundary && edge.points.length >= 6;
+function toClassificationInput(edge: CollectedCadEdgeGeometry) {
+  return {
+    curveType: edge.curveType,
+    surfaceTypes: edge.surfaceTypes,
+    angle: edge.angle,
+    manifold: edge.manifold,
+    boundary: edge.boundary,
+    pointCount: edge.points.length,
+    faceAreas: edge.faceAreas,
+  };
 }
 
 function releaseHandles(cad: OcctKernel, handles: ShapeHandle[]) {
@@ -396,14 +396,24 @@ function collectEdges(cad: OcctKernel, shape: ShapeHandle, sharpAngle: number, s
       } catch {
         curveType = "unknown";
       }
-      return { id, points, ...classification, curveType, surfaceTypes, faceAreas };
+      const recovered = recoveredHoleRimClassification({
+        curveType,
+        surfaceTypes,
+        angle: classification.angle,
+        manifold: classification.manifold,
+        boundary: classification.boundary,
+      });
+      return { id, points, ...recovered, curveType, surfaceTypes, faceAreas };
     }).filter((edge) => edge.points.length >= 6);
     const edges: CollectedCadEdge[] = collectedEdges.map((edge) => {
-      const display = treatmentAreaLimit > 0 ? isModifierDisplayCadEdge(edge, treatmentAreaLimit) : isDisplayCadEdge(edge);
+      const classified = toClassificationInput(edge);
+      const display = treatmentAreaLimit > 0
+        ? isModifierDisplayCadEdge(classified, treatmentAreaLimit)
+        : isDisplayCadEdge(classified);
       return {
         ...edge,
         display,
-        selectable: isSelectableModifierEdge(edge) && (treatmentAreaLimit <= 0 || display),
+        selectable: isSelectableModifierEdge(classified) && (treatmentAreaLimit <= 0 || display),
       };
     });
     const selectableEdgeIds = edges.filter((edge) => edge.selectable && edge.angle + 1e-3 >= sharpAngle).map((edge) => edge.id);

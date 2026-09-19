@@ -159,7 +159,7 @@ const tools = [
   },
   {
     name: "sketchforge_ungroup_objects",
-    description: "Ungroup one or more grouped objects by id and preserve their edited geometry.",
+    description: "Ungroup the last selected group one level. Repeat to unwrap nested groups one at a time.",
     inputSchema: {
       ...editorTargetSchema,
       properties: {

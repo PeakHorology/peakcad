@@ -33,6 +33,9 @@ coverage/
 test-results/
 playwright-report/
 .playwright-cli/
+.tmp-mcp/
+.tmp/
+*.tmp
 
 # Local workspace state
 .codex/
@@ -50,5 +53,8 @@ Thumbs.db
 # Claude Code local settings (machine-specific)
 .claude/settings.local.json
 
-# Staged occt-wasm runtime (copied from node_modules by scripts/copy-occt-wasm.mjs)
+# Staged WASM runtimes (copied from node_modules by scripts/copy-occt-wasm.mjs)
 apps/web/public/occt/
+apps/web/public/manifold.js
+apps/web/public/manifold.wasm
+

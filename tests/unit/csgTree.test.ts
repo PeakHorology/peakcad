@@ -10,8 +10,12 @@ import {
   planarizeThinSolidPositions,
   reorderCsgChild,
   replaceLeafInCsgTree,
+  pickGroupToUngroup,
   setCsgChildSuppressed,
   shouldExpandGroupForBoolean,
+  expandBooleanOperands,
+  filterCoplanarDisplayEdges,
+  viewportGroupChildren,
   withCsgMeta,
 } from "../../apps/web/src/lib/csgTree";
 import type { WorkplaneShape } from "../../apps/web/src/types/sketchforge";
@@ -109,6 +113,25 @@ describe("csgTree", () => {
     expect(cleaned[16]).toBeCloseTo(1.0, 5);
   });
 
+  it("unifyCoplanar welds leftover same-plane seams without flattening real steps", () => {
+    const seam = [
+      0, 0, 0, 1, 0, 0, 0, 1, 0,
+      0.02, 0, 0, 1, 0, 0, 0, 1, 0,
+    ];
+    const defaultClean = cleanupBooleanPositions(seam);
+    const unified = cleanupBooleanPositions(seam, undefined, { unifyCoplanar: true });
+    expect(defaultClean[9]).toBeCloseTo(0.02, 5);
+    expect(unified[9]).toBeCloseTo(unified[0], 5);
+
+    const stepped = [
+      0, 0, 0, 10, 0, 0, 0, 1.0, 0,
+      0, 0, 5, 10, 0, 5, 0, 1.01, 5,
+    ];
+    const kept = cleanupBooleanPositions(stepped, undefined, { unifyCoplanar: true });
+    expect(kept[7]).toBeCloseTo(1.0, 5);
+    expect(kept[16]).toBeCloseTo(1.01, 5);
+  });
+
   it("planarizeThinSolidPositions collapses elevation-stagger ridges on thin plates", () => {
     // Bottom at 0, mixed tops at 1.00 and 1.01 (union stagger scar).
     const positions = [
@@ -189,6 +212,33 @@ describe("csgTree", () => {
     expect(shouldExpandGroupForBoolean(nextBox)).toBe(false);
   });
 
+  it("recursively expands nested assemblies but keeps baked groups sealed", () => {
+    const bakedKnurl: WorkplaneShape = {
+      ...boxChild("knurl"),
+      kind: "mesh",
+      groupedShapes: [boxChild("tooth-a"), boxChild("tooth-b")],
+      importedMesh: {
+        positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],
+        baseWidth: 10,
+        baseDepth: 10,
+        baseHeight: 2,
+        triangleCount: 1,
+        sourceFormat: "json",
+      },
+      csg: { op: "union", version: 1 },
+    };
+    const inner: WorkplaneShape = {
+      ...boxChild("inner-asm"),
+      groupedShapes: [bakedKnurl, boxChild("block")],
+    };
+    const outer: WorkplaneShape = {
+      ...boxChild("outer-asm"),
+      groupedShapes: [inner, boxChild("cap")],
+    };
+    const expanded = expandBooleanOperands([outer], (shape) => shape.groupedShapes ?? []);
+    expect(expanded.map((shape) => shape.id)).toEqual(["knurl", "block", "cap"]);
+  });
+
   it("still expands assemblies and CSG bodies that have no mesh cache", () => {
     const assembly: WorkplaneShape = {
       ...boxChild("asm"),
@@ -203,5 +253,72 @@ describe("csgTree", () => {
       csg: { op: "subtract", version: 1 },
     };
     expect(shouldExpandGroupForBoolean(emptySubtract)).toBe(true);
+  });
+
+  it("never draws hole cutters after Group, even when the result mesh is missing", () => {
+    const body: WorkplaneShape = {
+      ...boxChild("cut-body"),
+      groupedShapes: [boxChild("solid"), boxChild("hole", true)],
+      csg: { op: "subtract", version: 1, dirty: true },
+    };
+    expect(viewportGroupChildren(body).map((child) => child.id)).toEqual(["solid"]);
+  });
+
+  it("draws no live children once a grouped result mesh exists", () => {
+    const body: WorkplaneShape = {
+      ...boxChild("cut-body"),
+      importedMesh: {
+        positions: [0, 0, 0, 1, 0, 0, 0, 1, 0],
+        baseWidth: 1,
+        baseDepth: 1,
+        baseHeight: 1,
+        triangleCount: 1,
+        sourceFormat: "json",
+      },
+      groupedShapes: [boxChild("solid"), boxChild("hole", true)],
+      csg: { op: "subtract", version: 1 },
+    };
+    expect(viewportGroupChildren(body)).toEqual([]);
+  });
+
+  it("drops leftover cutter wires that are not on the result mesh", () => {
+    const mesh = [
+      0, 0, 0, 20, 0, 0, 0, 0, 20,
+      20, 0, 0, 20, 0, 20, 0, 0, 20,
+    ];
+    const kept = filterCoplanarDisplayEdges(
+      [
+        { points: [0, 40, 0, 20, 40, 0] },
+        { points: [0, 0, 0, 20, 0, 0] },
+      ],
+      mesh,
+    );
+    expect(kept).toHaveLength(0);
+  });
+
+  it("hides a leftover diametric seam and keeps the 90-degree rim", () => {
+    // Two coplanar top triangles sharing (0,1,0)-(0,1,10), plus a vertical wall on (0,1,0)-(10,1,0).
+    const mesh = [
+      0, 1, 0, 10, 1, 0, 0, 1, 10,
+      10, 1, 0, 10, 1, 10, 0, 1, 10,
+      0, 1, 0, 0, 0, 0, 10, 1, 0,
+    ];
+    const kept = filterCoplanarDisplayEdges(
+      [
+        { points: [0, 1, 0, 0, 1, 10] },
+        { points: [0, 1, 0, 10, 1, 0] },
+      ],
+      mesh,
+    );
+    expect(kept).toHaveLength(1);
+    expect(kept[0].points).toEqual([0, 1, 0, 10, 1, 0]);
+  });
+
+  it("peels the last-selected group so Ungroup walks nested groups one at a time", () => {
+    expect(pickGroupToUngroup(["outer", "other"], ["inner", "outer"])).toBe("outer");
+    expect(pickGroupToUngroup(["inner", "leaf", "outer"], ["inner", "outer"])).toBe("outer");
+    expect(pickGroupToUngroup(["inner", "leaf"], ["inner"])).toBe("inner");
+    expect(pickGroupToUngroup(["leaf"], ["inner", "outer"])).toBe("outer");
+    expect(pickGroupToUngroup([], [])).toBeNull();
   });
 });

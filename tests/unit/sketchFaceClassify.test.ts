@@ -67,6 +67,26 @@ describe("classifySketchFaceHit", () => {
     expect(hit.blockedReason).toMatch(/curved/i);
   });
 
+  it("uses top vs base radius for cone disc caps", () => {
+    const shape = cylinder({
+      kind: "cone",
+      width: 28,
+      depth: 28,
+      height: 40,
+      baseRadius: 14,
+      topRadius: 6,
+    });
+    const top = classifySketchFaceHit(shape, { x: 0, y: 40, z: 0 }, { x: 0, y: 1, z: 0 });
+    expect(top.kind).toBe("planar");
+    expect(top.analytic?.type).toBe("disc-cap");
+    expect(top.analytic?.radius).toBeCloseTo(6, 5);
+
+    const bottom = classifySketchFaceHit(shape, { x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });
+    expect(bottom.kind).toBe("planar");
+    expect(bottom.analytic?.type).toBe("disc-cap");
+    expect(bottom.analytic?.radius).toBeCloseTo(14, 5);
+  });
+
   it("allows half-sphere flat cut and blocks the dome", () => {
     const shape = cylinder({ kind: "halfSphere", height: 10, width: 20, depth: 20 });
     const flat = classifySketchFaceHit(shape, { x: 0, y: 0, z: 0 }, { x: 0, y: -1, z: 0 });

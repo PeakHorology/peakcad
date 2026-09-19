@@ -98,13 +98,20 @@ export function clampRoofRidgeX(width: number, height: number, ridgeX: number) {
 
 /**
  * Resolve the triangle peak from stored angles + current size.
- * Height/width stay as given; angles only slide the peak horizontally.
+ * Similar (W,H) scales keep both base angles; a lone angle edit slides the peak.
+ * When both angles are stored, average the two ridge estimates so one side
+ * cannot steal the apex if width/height briefly disagree.
  */
 export function roofAnglesFromProfile(width: number, height: number, leftAngle?: number, rightAngle?: number) {
   const safeWidth = Math.max(0.01, width);
   const safeHeight = Math.max(0.01, height);
   let ridgeX = 0;
-  if (typeof leftAngle === "number") {
+  if (typeof leftAngle === "number" && typeof rightAngle === "number") {
+    ridgeX = (
+      roofRidgeXFromLeftAngle(safeWidth, safeHeight, leftAngle)
+      + roofRidgeXFromRightAngle(safeWidth, safeHeight, rightAngle)
+    ) / 2;
+  } else if (typeof leftAngle === "number") {
     ridgeX = roofRidgeXFromLeftAngle(safeWidth, safeHeight, leftAngle);
   } else if (typeof rightAngle === "number") {
     ridgeX = roofRidgeXFromRightAngle(safeWidth, safeHeight, rightAngle);

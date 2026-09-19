@@ -224,6 +224,17 @@ export function ToolbarCircularPatternIcon() {
   return <ToolbarCommandImage file="toolbar-circular-pattern.png" className="toolbar-user-art-icon" />;
 }
 
+export function ToolbarLinearPatternIcon(props: IconProps) {
+  return (
+    <svg viewBox="0 0 48 48" aria-hidden="true" {...props}>
+      <rect x="8" y="18" width="10" height="10" rx="1.6" fill="none" stroke="currentColor" strokeWidth="2.4" />
+      <rect x="19" y="18" width="10" height="10" rx="1.6" fill="none" stroke="currentColor" strokeWidth="2.4" />
+      <rect x="30" y="18" width="10" height="10" rx="1.6" fill="none" stroke="currentColor" strokeWidth="2.4" />
+      <path d="M13 14v-3M24 14v-3M35 14v-3M13 32v3M24 32v3M35 32v3" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
 export function ToolbarThreadIcon(props: IconProps) {
   return (
     <svg viewBox="0 0 48 48" aria-hidden="true" {...props}>

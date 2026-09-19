@@ -1,6 +1,6 @@
 # PeakCAD — Getting Started
 
-PeakCAD is your personal fork of [SketchForge](https://github.com/Formsmith746/SketchForge-3D), a local Tinkercad-style 3D design app.
+PeakCAD is local-first CAD from **PeakHorologyLLC** (Beta 0.9.x) — Tinkercad-easy authoring with exact STEP when possible. See [docs/BETA-LIMITATIONS.md](docs/BETA-LIMITATIONS.md) for known Beta gaps.
 
 ## Quick start (every time you want to use the app)
 
@@ -8,7 +8,7 @@ PeakCAD is your personal fork of [SketchForge](https://github.com/Formsmith746/S
 2. Run these commands:
 
 ```powershell
-cd "C:\Users\RTX 5070\Projects\my-cad-studio"
+cd path\to\peakcad
 npm run dev
 ```
 
@@ -19,14 +19,14 @@ npm run dev
 ## Package as a desktop app
 
 ```powershell
-cd "C:\Users\RTX 5070\Projects\my-cad-studio"
+cd path\to\peakcad
 npm run package:desktop
 ```
 
 This creates files in the `dist-release/` folder:
 
-- `PeakCAD-Setup-0.9.7.exe` — installer (adds Start Menu + Desktop shortcut; version matches `package.json`)
-- `PeakCAD-0.9.7-portable.exe` — portable build (no install needed; not an upgrader)
+- `PeakCAD-Setup-0.9.11.exe` — installer (adds Start Menu + Desktop shortcut; version matches `package.json`)
+- `PeakCAD-0.9.11-portable.exe` — portable build (no install needed; not an upgrader)
 
 Close any running PeakCAD window before packaging.
 
@@ -34,7 +34,7 @@ Close any running PeakCAD window before packaging.
 
 You do **not** need to uninstall PeakCAD first. The Setup installer upgrades in place and keeps your projects/settings.
 
-1. Bump `"version"` in `package.json` (for example `0.9.7` → `0.9.8`)
+1. Bump `"version"` in `package.json` (for example `0.9.10` → `0.9.11`)
 2. Close PeakCAD
 3. Run `npm run package:desktop`
 4. Run the new `PeakCAD-Setup-*.exe` from `dist-release/`
@@ -67,6 +67,14 @@ Good files to customize:
 | `apps/web/src/app/page.tsx` | Home screen, project list |
 | `apps/web/src/app/globals.css` | Colors and styling |
 | `apps/web/src/lib/shapeCatalog.ts` | Available shapes |
+
+## Quality checks
+
+```powershell
+npm run ci
+```
+
+Runs typecheck, unit tests, and STEP e2e (OpenCascade).
 
 ## Troubleshooting
 

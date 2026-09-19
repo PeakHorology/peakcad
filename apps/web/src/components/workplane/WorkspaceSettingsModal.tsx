@@ -334,6 +334,7 @@ export function WorkspaceSettingsModal({
                       <span>Fast</span>
                     </small>
                   </PeakTipLabel>
+                  <p className="workspace-about-credit">PeakCAD is made by Peak Horology.</p>
                 </>
               ) : null}
 

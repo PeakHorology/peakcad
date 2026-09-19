@@ -137,6 +137,8 @@ export type TransformOverlayProps = {
   onEditingRotationChange: (value: string) => void;
   onCommitRotationEdit: () => void;
   onCancelRotationEdit: () => void;
+  /** Double-click through overlapping shapes. Return true if the click was consumed. */
+  onCycleStackedSelection?: (clientX: number, clientY: number) => boolean;
 };
 
 export function getElevationMeasureKey(overlay: TransformOverlayState | null) {

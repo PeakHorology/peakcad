@@ -35,6 +35,7 @@ describe("workplane settings helpers", () => {
           units: "Bricks",
           scale: "1:10 (centimeters)",
           accuracy: 3,
+          displayQuality: "draft",
         },
         fallback,
       ),
@@ -50,9 +51,12 @@ describe("workplane settings helpers", () => {
       units: "Bricks",
       scale: "1:1 (studs)",
       accuracy: 3,
+      displayQuality: "draft",
     });
 
     expect(normalizeWorkspaceSettings({ accuracy: 9 }, fallback).accuracy).toBe(fallback.accuracy);
+    expect(normalizeWorkspaceSettings({}, fallback).displayQuality).toBe(fallback.displayQuality);
+    expect(normalizeWorkspaceSettings({ displayQuality: "ultra" as never }, fallback).displayQuality).toBe(fallback.displayQuality);
   });
 
   it("keeps scale options in the selected unit family", () => {

@@ -19,9 +19,10 @@ describe("CAD modifier runtime state", () => {
   });
 
   it("sets a bounded preparation wait and an actionable compatibility error", () => {
+    // Browser profile ~30s; desktop hardware profile allows up to 180s.
     expect(CAD_MODIFIER_REQUEST_TIMEOUT_MS).toBeGreaterThanOrEqual(20_000);
-    expect(CAD_MODIFIER_REQUEST_TIMEOUT_MS).toBeLessThanOrEqual(60_000);
-    expect(cadModifierTimeoutMessage("prepare")).toContain("Firefox 121+");
+    expect(CAD_MODIFIER_REQUEST_TIMEOUT_MS).toBeLessThanOrEqual(180_000);
+    expect(cadModifierTimeoutMessage("prepare")).toMatch(/timed out|Draft quality|fewer edges/i);
   });
 
   it("does not expose thresholds above the worker's folded edge-angle range", () => {

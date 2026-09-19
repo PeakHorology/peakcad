@@ -79,7 +79,34 @@ describe("sketch document foundations", () => {
     const a2 = solved.doc.entities.find((e) => e.id === "a" && e.kind === "point");
     const b2 = solved.doc.entities.find((e) => e.id === "b" && e.kind === "point");
     if (a2?.kind === "point" && b2?.kind === "point") {
-      expect(Math.hypot(b2.x - a2.x, b2.z - a2.z)).toBeCloseTo(20, 0);
+      expect(Math.hypot(b2.x - a2.x, b2.z - a2.z)).toBeCloseTo(20, 5);
+    }
+  });
+
+  it("keeps horizontal and coincident exact after a drag-style solve", () => {
+    let doc = createEmptySketchDoc(defaultSketchPlane(), "hard-solve");
+    doc.entities = [
+      { kind: "point", id: "a", x: 0, z: 0 },
+      { kind: "point", id: "b", x: 12, z: 0.4 },
+      { kind: "point", id: "c", x: 12.2, z: 0.5 },
+      { kind: "line", id: "l1", startId: "a", endId: "b" },
+    ];
+    doc = addConstraints(doc, [
+      { kind: "horizontal", entityIds: ["l1"] },
+      { kind: "coincident", entityIds: [], pointIds: ["b", "c"] },
+    ]);
+    // Simulate user dragging point b off the constraint, then re-solving.
+    doc.entities = doc.entities.map((entity) => (
+      entity.id === "b" && entity.kind === "point" ? { ...entity, x: 15, z: 4 } : entity
+    ));
+    const solved = solveSketchDoc(doc);
+    const a = solved.doc.entities.find((e) => e.id === "a" && e.kind === "point");
+    const b = solved.doc.entities.find((e) => e.id === "b" && e.kind === "point");
+    const c = solved.doc.entities.find((e) => e.id === "c" && e.kind === "point");
+    expect(a?.kind === "point" && b?.kind === "point" && c?.kind === "point").toBe(true);
+    if (a?.kind === "point" && b?.kind === "point" && c?.kind === "point") {
+      expect(Math.abs(a.z - b.z)).toBeLessThan(1e-6);
+      expect(Math.hypot(b.x - c.x, b.z - c.z)).toBeLessThan(1e-6);
     }
   });
 

@@ -39,7 +39,7 @@ describe("shape catalog", () => {
       depth: 20,
       height: 20,
       radius: 0,
-      steps: 10,
+      steps: 16,
       locked: false,
       hidden: false,
     });

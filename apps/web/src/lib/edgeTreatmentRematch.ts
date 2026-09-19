@@ -207,6 +207,9 @@ export function matchRecipeEdgeIds(
     if (kept.length === recipe.edgeIds.length) {
       return kept;
     }
+    // Stored IDs are stale after remesh. Do not fillet the sharpest leftover
+    // edges — that silently treats the wrong part.
+    return [];
   }
 
   return [...selectable]

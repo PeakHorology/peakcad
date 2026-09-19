@@ -333,4 +333,54 @@ export type WorkplaneShape = {
   hidden?: boolean;
   /** When true, skipped during CSG evaluate / STEP (feature suppress). */
   suppressed?: boolean;
+  /**
+   * Linked linear/circular pattern. The source keeps this feature; copies are
+   * regenerated when count/spacing (or the source) changes.
+   */
+  patternFeature?: PatternFeature;
+  /** Thin reference plane — sketched on, skipped in export/Group. */
+  construction?: boolean;
+  /** Parametric hole cutter (diameter / through / counterbore). */
+  holeSpec?: HoleSpec;
+};
+
+export type LinearPatternFeatureParams = {
+  countX: number;
+  countZ: number;
+  countY?: number;
+  spacingX: number;
+  spacingZ: number;
+  spacingY?: number;
+};
+
+export type CircularPatternFeatureParams = {
+  count: number;
+  center: { x: number; z: number };
+  radius: number;
+  rotationOffset: number;
+  seatElevation?: number;
+};
+
+export type PatternFeature = {
+  id: string;
+  kind: "linear" | "circular";
+  role: "source" | "instance";
+  sourceId: string;
+  instanceIndex?: number;
+  linear?: LinearPatternFeatureParams;
+  circular?: CircularPatternFeatureParams;
+};
+
+export type HoleStyle = "simple" | "counterbore" | "countersink";
+export type HoleDepthMode = "through" | "blind";
+
+export type HoleSpec = {
+  diameter: number;
+  depth: number;
+  depthMode: HoleDepthMode;
+  style: HoleStyle;
+  counterboreDiameter?: number;
+  counterboreDepth?: number;
+  countersinkDiameter?: number;
+  countersinkAngle?: number;
 };

@@ -310,6 +310,8 @@ export function CircularPatternPanel({
   onApply,
   onCancel,
   positionClampWarning = false,
+  applyLabel = "Apply",
+  editing = false,
 }: {
   sourceCount: number;
   pivotName: string | null;
@@ -326,6 +328,8 @@ export function CircularPatternPanel({
   onCancel: () => void;
   /** True when one or more instances clamp to the ±110 mm workplane bounds. */
   positionClampWarning?: boolean;
+  applyLabel?: string;
+  editing?: boolean;
 }) {
   const [hintOpen, setHintOpen] = useState(false);
 
@@ -340,7 +344,7 @@ export function CircularPatternPanel({
     >
       <div className="edge-modifier-header">
         <div>
-          <strong>Circular pattern</strong>
+          <strong>{editing ? "Edit circular pattern" : "Circular pattern"}</strong>
           <p>
             {hasPivot
               ? `Orbit around ${pivotName ?? "pivot"} · ${count} total`
@@ -392,7 +396,7 @@ export function CircularPatternPanel({
         <button type="button" className="secondary" onClick={onCancel}>Cancel</button>
         <button type="button" className="primary" disabled={!canApply} onClick={onApply}>
           <Check size={17} />
-          Apply
+          {applyLabel}
         </button>
       </div>
     </aside>

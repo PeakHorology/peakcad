@@ -9,7 +9,8 @@ describe("sphere tessellation", () => {
   });
 
   it("uses the catalog default and normalizes fractional input", () => {
-    expect(sphereTessellation()).toEqual({ widthSegments: 48, heightSegments: 24 });
+    // No explicit steps → follow the active display quality (smooth → 64).
+    expect(sphereTessellation()).toEqual({ widthSegments: 128, heightSegments: 64 });
     expect(sphereTessellation(27.6)).toEqual({ widthSegments: 56, heightSegments: 28 });
   });
 });

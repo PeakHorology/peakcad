@@ -10,6 +10,7 @@ export type UiTheme = "light" | "dark";
 export const DEFAULT_UI_THEME: UiTheme = "light";
 export const DEFAULT_LIGHT_VIEWPORT_BACKGROUND = "#f8fbfc";
 export const DEFAULT_DARK_VIEWPORT_BACKGROUND = "#141a18";
+const STOCK_LIGHT_VIEWPORT_BACKGROUNDS = new Set(["#f4f1ee", "#f8fbfc"]);
 
 export function isUiTheme(value: unknown): value is UiTheme {
   return value === "light" || value === "dark";
@@ -63,7 +64,7 @@ export function readAppliedUiTheme(): UiTheme {
 
 /** Use a dark clear color when the project still has the stock light background. */
 export function resolveViewportBackground(storedBackground: string, theme: UiTheme = readAppliedUiTheme()): string {
-  if (theme === "dark" && (!storedBackground || storedBackground === DEFAULT_LIGHT_VIEWPORT_BACKGROUND)) {
+  if (theme === "dark" && (!storedBackground || STOCK_LIGHT_VIEWPORT_BACKGROUNDS.has(storedBackground.toLowerCase()))) {
     return DEFAULT_DARK_VIEWPORT_BACKGROUND;
   }
   return storedBackground || DEFAULT_LIGHT_VIEWPORT_BACKGROUND;
