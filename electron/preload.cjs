@@ -2,6 +2,18 @@ const { contextBridge, ipcRenderer } = require("electron");
 
 contextBridge.exposeInMainWorld("peakcadDesktop", true);
 
+let saveBeforeCloseHandler = null;
+let saveBeforeCloseToken = 0;
+
+// Main always gets exactly one reply per request, so a window-close Save never waits forever.
+ipcRenderer.on("peakcad:save-before-close", (_event, requestId) => {
+  const handler = saveBeforeCloseHandler;
+  const reply = (ok) => ipcRenderer.send("peakcad:save-before-close-result", requestId, ok === true);
+  Promise.resolve()
+    .then(() => (handler ? handler() : false))
+    .then(reply, () => reply(false));
+});
+
 contextBridge.exposeInMainWorld("peakcadFile", {
   isDesktop: true,
   defaultDir: () => ipcRenderer.invoke("peakcad:file-default-dir"),
@@ -21,5 +33,13 @@ contextBridge.exposeInMainWorld("peakcadFile", {
     const wrapped = (_event, action) => listener(action);
     ipcRenderer.on("peakcad:menu", wrapped);
     return () => ipcRenderer.removeListener("peakcad:menu", wrapped);
+  },
+  onSaveBeforeClose: (handler) => {
+    saveBeforeCloseToken += 1;
+    const token = saveBeforeCloseToken;
+    saveBeforeCloseHandler = handler;
+    return () => {
+      if (saveBeforeCloseToken === token) saveBeforeCloseHandler = null;
+    };
   },
 });

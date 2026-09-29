@@ -1,18 +1,21 @@
 "use client";
 
-const sketchCreateIcons = {
-  newSketch: "sketch-tool-sketch-to-3d.png",
-  editSketch: "sketch-tool-edit-sketch-to-3d.png",
-} as const;
-
-function SketchCreateIcon({ name }: { name: keyof typeof sketchCreateIcons }) {
+function SketchCreateIcon({ kind }: { kind: "new" | "edit" }) {
   return (
-    <img
-      className="sketch-create-menu-icon"
-      src={`/assets/sketchforge/${sketchCreateIcons[name]}`}
-      alt=""
-      draggable={false}
-    />
+    <svg className="sketch-create-menu-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      {kind === "new" ? (
+        <>
+          <path d="M4 16.5 12 20l8-3.5-8-3.5Z" />
+          <path d="M12 12.5V6" />
+          <path d="m12 6-2 2M12 6l2 2" />
+        </>
+      ) : (
+        <>
+          <path d="M4 16.5 12 20l8-3.5-8-3.5Z" />
+          <path d="M14.5 5.5 18 9l-7 7H7.5v-3.5l7-7Z" />
+        </>
+      )}
+    </svg>
   );
 }
 
@@ -29,7 +32,7 @@ export function SketchCreateMenu({
   return (
     <div className="sketch-create-menu" role="menu" aria-label="Sketch options">
       <button className="sketch-create-menu-item primary" type="button" role="menuitem" onClick={onNewSketch}>
-        <SketchCreateIcon name="newSketch" />
+        <SketchCreateIcon kind="new" />
         <span>New sketch</span>
       </button>
       <button
@@ -39,7 +42,7 @@ export function SketchCreateMenu({
         onClick={onEditSketch}
         disabled={!canEditSketch}
       >
-        <SketchCreateIcon name="editSketch" />
+        <SketchCreateIcon kind="edit" />
         <span>Edit sketch</span>
       </button>
     </div>

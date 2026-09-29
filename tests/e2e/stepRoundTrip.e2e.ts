@@ -24,11 +24,22 @@ vi.mock("@/lib/brepKernel", async () => {
 let brep: typeof import("brepjs");
 let exportShapesToStep: typeof import("@/lib/stepExport").exportShapesToStep;
 let importedShapeFromStep: typeof import("@/lib/stepImport").importedShapeFromStep;
+let importedShapesFromStep: typeof import("@/lib/stepImport").importedShapesFromStep;
+let importedMeshHasExactSource: typeof import("@/lib/importedBrepSource").importedMeshHasExactSource;
+let withBakedImportedBrepSteps: typeof import("@/lib/importedBrepSource").withBakedImportedBrepSteps;
+let bakeImportedBrepStepsForSave: typeof import("@/lib/importedBrepSource").bakeImportedBrepStepsForSave;
+let importedBrepStepsAwaitingSave: typeof import("@/lib/importedBrepSource").importedBrepStepsAwaitingSave;
 
 beforeAll(async () => {
   brep = await import("brepjs");
+  ({
+    importedMeshHasExactSource,
+    withBakedImportedBrepSteps,
+    bakeImportedBrepStepsForSave,
+    importedBrepStepsAwaitingSave,
+  } = await import("@/lib/importedBrepSource"));
   ({ exportShapesToStep } = await import("@/lib/stepExport"));
-  ({ importedShapeFromStep } = await import("@/lib/stepImport"));
+  ({ importedShapeFromStep, importedShapesFromStep } = await import("@/lib/stepImport"));
   // Warm the kernel via the mocked loader so brepjs has a registered kernel for
   // the re-import assertions below.
   const { loadBrepWithOcct } = await import("@/lib/brepKernel");
@@ -215,7 +226,11 @@ describe("STEP import → re-export round-trip (real OCCT kernel)", () => {
     const imported = await importedShapeFromStep("widget.step", bytes);
     expect(imported.kind).toBe("mesh");
     expect(imported.importedMesh?.sourceFormat).toBe("step");
-    expect(imported.importedMesh?.brepStep).toBeTruthy();
+    // The exact B-Rep is baked lazily: nothing stored at import, but the source is live.
+    expect(imported.importedMesh?.brepStep).toBeUndefined();
+    expect(importedMeshHasExactSource(imported.importedMesh)).toBe(true);
+    expect(imported.importedMesh?.indices?.length).toBeGreaterThan(0);
+    expect(imported.importedMesh?.triangleCount).toBe(imported.importedMesh!.indices!.length / 3);
     // Importer maps CAD Z-up (X12,Y8,Z6) to SketchForge Y-up (width12, height6, depth8).
     expect(near(imported.importedMesh!.baseWidth, 12)).toBe(true);
     expect(near(imported.importedMesh!.baseHeight, 6)).toBe(true);
@@ -225,7 +240,267 @@ describe("STEP import → re-export round-trip (real OCCT kernel)", () => {
     // import-normalize → store → re-emit pipeline.
     const reexport = await exportShapesToStep([imported]);
     expect(reexport.exportedCount).toBe(1);
+    expect(reexport.exactCount).toBe(1);
     expect(reexport.skipped).toEqual([]);
     expect(near(await reimportVolume(reexport.blob), 12 * 8 * 6)).toBe(true);
+
+    // First export bakes the text; attaching it lets a later export / save work without the kernel solid.
+    const [baked] = withBakedImportedBrepSteps([imported]);
+    expect(baked.importedMesh?.brepStep).toBeTruthy();
+    const again = await exportShapesToStep([baked]);
+    expect(again.exactCount).toBe(1);
+    expect(near(await reimportVolume(again.blob), 12 * 8 * 6)).toBe(true);
+  });
+
+  it("bakes exact STEP on explicit save so a reloaded project still exports exact", async () => {
+    const left = brep.translate(brep.box(10, 10, 10, { centered: true }), [-15, 0, 0]);
+    const right = brep.translate(brep.cylinder(4, 10), [15, 0, 0]);
+    const src = brep.exportSTEP(brep.compound([left, right]));
+    const bytes = await (src as { value: Blob }).value.arrayBuffer();
+    const shapes = await importedShapesFromStep("saved.step", bytes);
+    expect(importedBrepStepsAwaitingSave(shapes)).toHaveLength(2);
+
+    const saved = await bakeImportedBrepStepsForSave(shapes);
+    expect(saved.baked).toBe(2);
+    expect(saved.failedNames).toEqual([]);
+    expect(saved.shapes.every((entry) => Boolean(entry.importedMesh?.brepStep))).toBe(true);
+    expect(importedBrepStepsAwaitingSave(saved.shapes)).toEqual([]);
+
+    // Reload: a fresh mesh identity misses this session's registry, so only the stored text is left.
+    const reloaded = saved.shapes.map((entry) => ({
+      ...entry,
+      importedMesh: {
+        ...entry.importedMesh!,
+        positions: entry.importedMesh!.positions.slice(),
+        indices: [...entry.importedMesh!.indices!.slice(3), ...entry.importedMesh!.indices!.slice(0, 3)],
+      },
+    }));
+    const reexport = await exportShapesToStep(reloaded);
+    expect(reexport.exportedCount).toBe(2);
+    expect(reexport.exactCount).toBe(2);
+    expect(near(await reimportVolume(reexport.blob), 1000 + PI * 16 * 10)).toBe(true);
+  });
+
+  it("falls back to faceted export when a reloaded STEP import has no stored B-Rep", async () => {
+    const src = brep.exportSTEP(brep.box(12, 8, 6, { centered: true }));
+    const bytes = await (src as { value: Blob }).value.arrayBuffer();
+    const imported = await importedShapeFromStep("reloaded.step", bytes);
+    // Simulate a reload: the mesh survives but the live kernel solid does not. Rotating the
+    // triangle order keeps the geometry and winding but misses this session's registry entry.
+    const indices = imported.importedMesh!.indices!;
+    const reloaded: WorkplaneShape = {
+      ...imported,
+      importedMesh: {
+        ...imported.importedMesh!,
+        positions: imported.importedMesh!.positions.slice(),
+        indices: [...indices.slice(3), ...indices.slice(0, 3)],
+      },
+    };
+    expect(importedMeshHasExactSource(reloaded.importedMesh)).toBe(false);
+    const reexport = await exportShapesToStep([reloaded]);
+    expect(reexport.exportedCount).toBe(1);
+    expect(reexport.facetedCount).toBe(1);
+  });
+
+  it("imports each solid in a multi-body STEP as its own shape", async () => {
+    const left = brep.translate(brep.box(10, 10, 10, { centered: true }), [-15, 0, 0]);
+    const right = brep.translate(brep.box(10, 10, 10, { centered: true }), [15, 0, 0]);
+    const src = brep.exportSTEP(brep.compound([left, right]));
+    expect(src.ok).toBe(true);
+    const bytes = await (src as { value: Blob }).value.arrayBuffer();
+    const shapes = await importedShapesFromStep("pair.step", bytes);
+    expect(shapes).toHaveLength(2);
+    expect(shapes.every((entry) => importedMeshHasExactSource(entry.importedMesh))).toBe(true);
+    const reexport = await exportShapesToStep(shapes);
+    expect(reexport.exportedCount).toBe(2);
+    expect(reexport.exactCount).toBe(2);
+    expect(near(await reimportVolume(reexport.blob), 2000)).toBe(true);
+    const xs = shapes.map((entry) => entry.x).sort((a, b) => a - b);
+    expect(xs[1] - xs[0]).toBeGreaterThan(20);
+
+    // Per-solid local frames: xz-centred, sitting on y=0, placed about the (10, -10) drop point.
+    for (const entry of shapes) {
+      const positions = entry.importedMesh!.positions;
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, minZ = Infinity, maxZ = -Infinity;
+      for (let i = 0; i < positions.length; i += 3) {
+        minX = Math.min(minX, positions[i]); maxX = Math.max(maxX, positions[i]);
+        minY = Math.min(minY, positions[i + 1]);
+        minZ = Math.min(minZ, positions[i + 2]); maxZ = Math.max(maxZ, positions[i + 2]);
+      }
+      expect(Math.abs(minX + maxX)).toBeLessThan(1e-6);
+      expect(Math.abs(minZ + maxZ)).toBeLessThan(1e-6);
+      expect(Math.abs(minY)).toBeLessThan(1e-6);
+      expect(entry.importedMesh!.triangleCount).toBe(entry.importedMesh!.indices!.length / 3);
+    }
+    expect(Math.min(...shapes.map((entry) => entry.elevation ?? 0))).toBeCloseTo(0, 6);
+    const centerX = (Math.min(...shapes.map((entry) => entry.x - entry.width / 2)) + Math.max(...shapes.map((entry) => entry.x + entry.width / 2))) / 2;
+    const centerZ = (Math.min(...shapes.map((entry) => entry.z - entry.depth / 2)) + Math.max(...shapes.map((entry) => entry.z + entry.depth / 2))) / 2;
+    expect(centerX).toBeCloseTo(10, 6);
+    expect(centerZ).toBeCloseTo(-10, 6);
+  });
+
+  it("keeps a grouped sketch at the group position when its plane is still in world coordinates", async () => {
+    const plane = {
+      origin: { x: 80, y: 0, z: 0 },
+      normal: { x: 0, y: 1, z: 0 },
+      uAxis: { x: 1, y: 0, z: 0 },
+    };
+    const sketch = shape({
+      id: "sk",
+      kind: "mesh",
+      name: "Sketch",
+      x: 0,
+      width: 10,
+      depth: 10,
+      height: 10,
+      sketchFinish: "extrude",
+      sketchPlane: plane,
+      sketchProfile: {
+        sketchPlane: plane,
+        points: [
+          { id: "p0", x: -5, z: -5 },
+          { id: "p1", x: 5, z: -5 },
+          { id: "p2", x: 5, z: 5 },
+          { id: "p3", x: -5, z: 5 },
+        ],
+        segments: [
+          { id: "e0", kind: "line", startId: "p0", endId: "p1" },
+          { id: "e1", kind: "line", startId: "p1", endId: "p2" },
+          { id: "e2", kind: "line", startId: "p2", endId: "p3" },
+          { id: "e3", kind: "line", startId: "p3", endId: "p0" },
+        ],
+      },
+    });
+    const group = shape({
+      kind: "mesh",
+      name: "GroupedSketch",
+      x: 80,
+      width: 10,
+      depth: 10,
+      height: 10,
+      csg: { op: "union", version: 1 },
+      groupedShapes: [sketch],
+    });
+    const { blob, exportedCount, exactCount } = await exportShapesToStep([group]);
+    expect(exportedCount).toBe(1);
+    expect(exactCount).toBe(1);
+    expect(near(await reimportVolume(blob), 1000)).toBe(true);
+    const imported = await brep.importSTEP(blob);
+    expect(imported.ok).toBe(true);
+    if (!imported.ok) return;
+    const tess = brep.mesh(imported.value);
+    let minX = Infinity;
+    let maxX = -Infinity;
+    for (let i = 0; i < tess.vertices.length; i += 3) {
+      minX = Math.min(minX, tess.vertices[i]);
+      maxX = Math.max(maxX, tess.vertices[i]);
+    }
+    expect((minX + maxX) / 2).toBeCloseTo(80, 0);
+  });
+
+  it("cuts a grouped planar sketch hole and keeps the group position", async () => {
+    const plane = {
+      origin: { x: 40, y: 0, z: 0 },
+      normal: { x: 0, y: 1, z: 0 },
+      uAxis: { x: 1, y: 0, z: 0 },
+    };
+    const box = shape({ id: "plate", kind: "box", name: "Plate", x: 0, width: 20, depth: 20, height: 10 });
+    const hole = shape({
+      id: "sk-hole",
+      kind: "mesh",
+      name: "Hole",
+      hole: true,
+      x: 0,
+      width: 6,
+      depth: 6,
+      height: 10,
+      sketchFinish: "extrude",
+      sketchPlane: plane,
+      sketchProfile: {
+        sketchPlane: plane,
+        points: [
+          { id: "p0", x: -3, z: -3 },
+          { id: "p1", x: 3, z: -3 },
+          { id: "p2", x: 3, z: 3 },
+          { id: "p3", x: -3, z: 3 },
+        ],
+        segments: [
+          { id: "e0", kind: "line", startId: "p0", endId: "p1" },
+          { id: "e1", kind: "line", startId: "p1", endId: "p2" },
+          { id: "e2", kind: "line", startId: "p2", endId: "p3" },
+          { id: "e3", kind: "line", startId: "p3", endId: "p0" },
+        ],
+      },
+    });
+    const group = shape({
+      kind: "mesh",
+      name: "GroupedHole",
+      x: 40,
+      width: 20,
+      depth: 20,
+      height: 10,
+      csg: { op: "subtract", version: 1 },
+      groupedShapes: [box, hole],
+    });
+    const { blob, exportedCount, exactCount } = await exportShapesToStep([group]);
+    expect(exportedCount).toBe(1);
+    expect(exactCount).toBe(1);
+    expect(near(await reimportVolume(blob), 20 * 20 * 10 - 6 * 6 * 10)).toBe(true);
+    const imported = await brep.importSTEP(blob);
+    expect(imported.ok).toBe(true);
+    if (!imported.ok) return;
+    const tess = brep.mesh(imported.value);
+    let minX = Infinity;
+    let maxX = -Infinity;
+    for (let i = 0; i < tess.vertices.length; i += 3) {
+      minX = Math.min(minX, tess.vertices[i]);
+      maxX = Math.max(maxX, tess.vertices[i]);
+    }
+    expect((minX + maxX) / 2).toBeCloseTo(40, 0);
+  });
+
+  it("bakes a circular barrel sketch as an exact radial cylinder", async () => {
+    const points = Array.from({ length: 16 }, (_, index) => {
+      const t = (index / 16) * Math.PI * 2;
+      return { id: `p${index}`, x: Math.cos(t) * 2, z: Math.sin(t) * 2 };
+    });
+    const surface = {
+      kind: "cylinder" as const,
+      axisOrigin: { x: 0, y: 5, z: 0 },
+      axisDir: { x: 0, y: 1, z: 0 },
+      radial0: { x: 1, y: 0, z: 0 },
+      radius: 10,
+      height: 10,
+      theta0: 0,
+    };
+    const plane = {
+      origin: { x: 10, y: 5, z: 0 },
+      normal: { x: 1, y: 0, z: 0 },
+      uAxis: { x: 0, y: 0, z: 1 },
+      surface,
+    };
+    const boss = shape({
+      kind: "mesh",
+      name: "BarrelBoss",
+      width: 4,
+      depth: 4,
+      height: 4,
+      sketchFinish: "extrude",
+      sketchPlane: plane,
+      sketchProfile: {
+        sketchPlane: plane,
+        points,
+        segments: points.map((_, index) => ({
+          id: `e${index}`,
+          kind: "line" as const,
+          startId: `p${index}`,
+          endId: `p${(index + 1) % points.length}`,
+        })),
+      },
+    });
+    const { blob, exportedCount, exactCount } = await exportShapesToStep([boss]);
+    expect(exportedCount).toBe(1);
+    expect(exactCount).toBe(1);
+    expect(near(await reimportVolume(blob), Math.PI * 4 * 4)).toBe(true);
   });
 });

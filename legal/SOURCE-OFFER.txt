@@ -1,0 +1,37 @@
+PeakCAD {{VERSION}} - Written Offer for Corresponding Source
+============================================================
+
+Copyright (C) PeakHorologyLLC
+
+PeakCAD is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software
+Foundation, either version 3 of the License, or (at your option) any later
+version (GPL-3.0-or-later). A copy of the license is included as LICENSE.txt.
+
+PeakCAD is distributed in the hope that it will be useful, but WITHOUT ANY
+WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR
+A PARTICULAR PURPOSE. See the GNU General Public License for more details.
+
+Corresponding Source
+--------------------
+The Corresponding Source for this PeakCAD {{VERSION}} build is the PeakCAD
+source repository (the "peakcad" project by PeakHorologyLLC) at the revision
+that produced this installer, including the build scripts used to create it
+(npm run package:desktop).
+
+For at least three years from the date you received this build, and for as
+long as PeakHorologyLLC offers spare parts or support for it, PeakHorologyLLC
+will provide anyone who possesses this object code a complete copy of that
+Corresponding Source, under GPL-3.0-or-later, for no more than the reasonable
+cost of physically performing the transfer. Contact PeakHorologyLLC through
+https://peakhorology.com to request it.
+
+Third-party components
+----------------------
+This build also contains third-party components under their own licenses.
+See THIRD-PARTY-NOTICES.txt. In particular, the OpenCascade Technology (OCCT)
+WebAssembly kernel is licensed under the GNU Lesser General Public License
+version 2.1 with the Open CASCADE exception. Its source is available from
+https://github.com/Open-Cascade-SAS/OCCT and the WebAssembly build scripts
+from https://github.com/andymai/occt-wasm. The same written offer above also
+covers the source for the OCCT build shipped here.

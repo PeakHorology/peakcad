@@ -53,6 +53,238 @@ export function splitLineAtPoint(doc: SketchDoc, lineId: string, at: SketchVec2)
   return pruneDanglingReferences(next);
 }
 
+const CURVE_SEGMENT_ID = /^(.*)-s\d+$/;
+const TRIM_ENDPOINT_GAP = 0.02;
+
+function lineCircleParameters(
+  a: SketchVec2,
+  b: SketchVec2,
+  center: SketchVec2,
+  radius: number,
+): number[] {
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  const fx = a.x - center.x;
+  const fz = a.z - center.z;
+  const A = dx * dx + dz * dz;
+  if (A < 1e-12) return [];
+  const B = 2 * (fx * dx + fz * dz);
+  const C = fx * fx + fz * fz - radius * radius;
+  const disc = B * B - 4 * A * C;
+  if (disc < 0) return [];
+  const root = Math.sqrt(disc);
+  return [(-B - root) / (2 * A), (-B + root) / (2 * A)];
+}
+
+function projectParameter(at: SketchVec2, a: SketchVec2, b: SketchVec2): number {
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  const len2 = dx * dx + dz * dz;
+  if (len2 < 1e-12) return 0;
+  return ((at.x - a.x) * dx + (at.z - a.z) * dz) / len2;
+}
+
+/** A drawn circle's tessellated chord (`circleId-s3`) or the circle entity itself. */
+export function resolveSketchCircle(doc: SketchDoc, segmentId?: string | null, pointId?: string | null) {
+  const ids = [segmentId, pointId].filter((id): id is string => Boolean(id));
+  for (const id of ids) {
+    const curveId = CURVE_SEGMENT_ID.exec(id)?.[1] ?? id;
+    const byId = doc.entities.find((entity) => entity.id === curveId && entity.kind === "circle");
+    if (byId && byId.kind === "circle") return byId;
+  }
+  if (pointId) {
+    const byCenter = doc.entities.find((entity) => entity.kind === "circle" && entity.centerId === pointId);
+    if (byCenter && byCenter.kind === "circle") return byCenter;
+  }
+  return null;
+}
+
+/**
+ * Fusion-style trim: delete only the span that contains the click, cutting the curve at every
+ * intersection. A curve with nothing to cut against is removed entirely.
+ */
+export function trimClickedSpan(doc: SketchDoc, entityId: string, at: SketchVec2): SketchDoc {
+  const direct = doc.entities.find((entity) => entity.id === entityId);
+  if (direct?.kind === "line") return trimLineAt(doc, direct, at);
+  const curveId = CURVE_SEGMENT_ID.exec(entityId)?.[1];
+  const curve = curveId ? doc.entities.find((entity) => entity.id === curveId) : null;
+  if (curve?.kind === "circle") return trimCircleAt(doc, curve, at);
+  return trimEntity(doc, entityId);
+}
+
+function trimLineAt(doc: SketchDoc, line: Extract<SketchEntity, { kind: "line" }>, at: SketchVec2): SketchDoc {
+  const next = cloneSketchDoc(doc);
+  const a = pointById(next, line.startId);
+  const b = pointById(next, line.endId);
+  if (!a || !b) return doc;
+  const cuts: Array<{ t: number; x: number; z: number; pointId?: string }> = [];
+  const consider = (t: number, x: number, z: number, pointId?: string) => {
+    if (t <= TRIM_ENDPOINT_GAP || t >= 1 - TRIM_ENDPOINT_GAP) return;
+    const near = cuts.find((cut) => Math.abs(cut.t - t) < 1e-3);
+    if (near) {
+      if (!near.pointId && pointId) near.pointId = pointId;
+      return;
+    }
+    cuts.push({ t, x, z, pointId });
+  };
+
+  for (const entity of next.entities) {
+    if (entity.id === line.id) continue;
+    if (entity.kind === "line") {
+      const c = pointById(next, entity.startId);
+      const d = pointById(next, entity.endId);
+      if (!c || !d) continue;
+      const hit = segmentHit(a, b, c, d);
+      if (hit) consider(hit.t, hit.x, hit.z, hit.pointId);
+      for (const end of [c, d]) {
+        const t = projectParameter(end, a, b);
+        const x = a.x + (b.x - a.x) * t;
+        const z = a.z + (b.z - a.z) * t;
+        if (Math.hypot(end.x - x, end.z - z) <= 0.05) consider(t, end.x, end.z, end.id);
+      }
+    } else if (entity.kind === "circle") {
+      const center = pointById(next, entity.centerId);
+      if (!center) continue;
+      for (const t of lineCircleParameters(a, b, center, entity.radius)) {
+        consider(t, a.x + (b.x - a.x) * t, a.z + (b.z - a.z) * t);
+      }
+    }
+  }
+
+  if (!cuts.length) return trimEntity(doc, line.id);
+  cuts.sort((left, right) => left.t - right.t);
+  const clickT = Math.min(1, Math.max(0, projectParameter(at, a, b)));
+  const stations = [
+    { t: 0, pointId: a.id },
+    ...cuts.map((cut) => ({ t: cut.t, pointId: cut.pointId ?? placePoint(next, cut.x, cut.z) })),
+    { t: 1, pointId: b.id },
+  ];
+  next.entities = next.entities.filter((entity) => entity.id !== line.id);
+  for (let index = 0; index < stations.length - 1; index += 1) {
+    const start = stations[index];
+    const end = stations[index + 1];
+    const containsClick = clickT >= start.t - 1e-6 && (index === stations.length - 2 ? clickT <= end.t + 1e-6 : clickT < end.t - 1e-9);
+    if (containsClick || start.pointId === end.pointId) continue;
+    next.entities.push({
+      kind: "line",
+      id: newId("sketch-segment"),
+      startId: start.pointId,
+      endId: end.pointId,
+      construction: line.construction,
+    });
+  }
+  return dropOrphanPoints(next);
+}
+
+function trimCircleAt(doc: SketchDoc, circle: Extract<SketchEntity, { kind: "circle" }>, at: SketchVec2): SketchDoc {
+  const next = cloneSketchDoc(doc);
+  const center = pointById(next, circle.centerId);
+  if (!center) return trimEntity(doc, circle.id);
+  const hits: Array<{ angle: number; pointId?: string }> = [];
+  const consider = (angle: number, x: number, z: number, pointId?: string) => {
+    const wrapped = (angle + Math.PI * 2) % (Math.PI * 2);
+    const near = hits.find((hit) => Math.min(Math.abs(hit.angle - wrapped), Math.PI * 2 - Math.abs(hit.angle - wrapped)) < 0.02);
+    if (near) {
+      if (!near.pointId && pointId) near.pointId = pointId;
+      return;
+    }
+    hits.push({ angle: wrapped, pointId });
+  };
+  for (const entity of next.entities) {
+    if (entity.kind !== "line") continue;
+    const a = pointById(next, entity.startId);
+    const b = pointById(next, entity.endId);
+    if (!a || !b) continue;
+    for (const t of lineCircleParameters(a, b, center, circle.radius)) {
+      if (t < -1e-4 || t > 1 + 1e-4) continue;
+      const x = a.x + (b.x - a.x) * t;
+      const z = a.z + (b.z - a.z) * t;
+      const reuse = [a, b].find((point) => Math.hypot(point.x - x, point.z - z) <= 0.05);
+      consider(Math.atan2(z - center.z, x - center.x), x, z, reuse?.id);
+    }
+  }
+  if (hits.length < 2) return trimEntity(doc, circle.id);
+  hits.sort((left, right) => left.angle - right.angle);
+  const clickAngle = (Math.atan2(at.z - center.z, at.x - center.x) + Math.PI * 2) % (Math.PI * 2);
+  const ccw = (from: number, to: number) => {
+    const span = (to - from + Math.PI * 2) % (Math.PI * 2);
+    return span === 0 ? Math.PI * 2 : span;
+  };
+  let removeFrom = hits[hits.length - 1];
+  let removeTo = hits[0];
+  for (let index = 0; index < hits.length; index += 1) {
+    const from = hits[index];
+    const to = hits[(index + 1) % hits.length];
+    if (ccw(from.angle, clickAngle) <= ccw(from.angle, to.angle) + 1e-6) {
+      removeFrom = from;
+      removeTo = to;
+      break;
+    }
+  }
+  const startId = removeTo.pointId ?? placePoint(next, center.x + Math.cos(removeTo.angle) * circle.radius, center.z + Math.sin(removeTo.angle) * circle.radius);
+  const endId = removeFrom.pointId ?? placePoint(next, center.x + Math.cos(removeFrom.angle) * circle.radius, center.z + Math.sin(removeFrom.angle) * circle.radius);
+  next.entities = next.entities.filter((entity) => entity.id !== circle.id);
+  if (startId !== endId) {
+    next.entities.push({
+      kind: "arc",
+      id: newId("sketch-arc"),
+      centerId: center.id,
+      startId,
+      endId,
+      ccw: true,
+      construction: circle.construction,
+    });
+  }
+  return dropOrphanPoints(next);
+}
+
+function dropOrphanPoints(doc: SketchDoc): SketchDoc {
+  const used = new Set<string>();
+  for (const entity of doc.entities) {
+    if (entity.kind === "line" || entity.kind === "bezier" || entity.kind === "smooth") {
+      used.add(entity.startId);
+      used.add(entity.endId);
+    } else if (entity.kind === "circle") {
+      used.add(entity.centerId);
+    } else if (entity.kind === "arc") {
+      used.add(entity.centerId);
+      used.add(entity.startId);
+      used.add(entity.endId);
+    }
+  }
+  doc.entities = doc.entities.filter((entity) => entity.kind !== "point" || used.has(entity.id) || entity.fixed || entity.projected);
+  return pruneDanglingReferences(doc);
+}
+
+function placePoint(doc: SketchDoc, x: number, z: number): string {
+  const existing = doc.entities.find((entity) => entity.kind === "point" && Math.hypot(entity.x - x, entity.z - z) <= 0.05);
+  if (existing) return existing.id;
+  const id = newId("sketch-point");
+  doc.entities.push({ kind: "point", id, x, z });
+  return id;
+}
+
+function segmentHit(
+  a: SketchPointEntity,
+  b: SketchPointEntity,
+  c: SketchPointEntity,
+  d: SketchPointEntity,
+): { t: number; x: number; z: number; pointId?: string } | null {
+  const dax = b.x - a.x;
+  const daz = b.z - a.z;
+  const dbx = d.x - c.x;
+  const dbz = d.z - c.z;
+  const denom = dax * dbz - daz * dbx;
+  if (Math.abs(denom) < 1e-12) return null;
+  const t = ((c.x - a.x) * dbz - (c.z - a.z) * dbx) / denom;
+  const u = ((c.x - a.x) * daz - (c.z - a.z) * dax) / denom;
+  if (t < -1e-6 || t > 1 + 1e-6 || u < -1e-6 || u > 1 + 1e-6) return null;
+  const x = a.x + dax * t;
+  const z = a.z + daz * t;
+  const reuse = [a, b, c, d].find((point) => Math.hypot(point.x - x, point.z - z) <= 0.05);
+  return { t, x, z, pointId: reuse?.id };
+}
+
 /** Trim: remove a line segment entity. */
 export function trimEntity(doc: SketchDoc, entityId: string): SketchDoc {
   const next = cloneSketchDoc(doc);

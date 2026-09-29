@@ -212,6 +212,8 @@ export function EditorTopBar({
             {logo}
           </div>
         )}
+        <span className="editor-top-bar-wordmark">PeakCAD</span>
+        <div className="editor-top-bar-divider" aria-hidden="true" />
         <EditorProjectTitle
           projectName={projectName ?? DEFAULT_PROJECT_NAME}
           onProjectNameChange={onProjectNameChange}

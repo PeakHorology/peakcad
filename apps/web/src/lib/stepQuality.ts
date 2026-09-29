@@ -2,6 +2,7 @@ import type { WorkplaneShape } from "@/types/sketchforge";
 import { isEvaluatedCsgBody } from "@/lib/csgTree";
 import { NATIVE_FACETED_KINDS, shapeSupportsExactNativeBrep } from "@/lib/shapeBrep";
 import { aabbsOverlap, worldAabb } from "@/lib/shapeBounds";
+import { importedMeshHasExactSource } from "@/lib/importedBrepSource";
 
 export type ShapeExportQualityHint =
   | "exact"
@@ -26,6 +27,15 @@ export function shapeHasExactBrepSource(shape: WorkplaneShape): boolean {
 }
 
 /**
+ * Exact at STEP export time. Unlike {@link shapeHasExactBrepSource} this also counts a STEP import
+ * whose B-Rep bake is still deferred; the writer bakes it on demand. Kept out of the CSG
+ * eligibility check so a deferred import never pulls OCCT into Group/edit.
+ */
+function shapeExportsExact(shape: WorkplaneShape): boolean {
+  return shapeHasExactBrepSource(shape) || importedMeshHasExactSource(shape.importedMesh);
+}
+
+/**
  * Honest inspector/export badge for a body.
  * Native exact kinds and stored B-Rep → exact; otherwise faceted/pending.
  */
@@ -37,7 +47,7 @@ export function shapeExportQualityHint(shape: WorkplaneShape): ShapeExportQualit
     if (shape.importedMesh?.positions && shape.importedMesh.positions.length >= 9) return "faceted";
     return "pending";
   }
-  if (shape.cadBrep || shape.importedMesh?.brepStep) return "exact";
+  if (shape.cadBrep || importedMeshHasExactSource(shape.importedMesh)) return "exact";
   if (shapeSupportsExactNativeBrep(shape)) return "exact";
   if (shape.importedMesh?.positions && shape.importedMesh.positions.length >= 9) return "faceted";
   // A faceted-by-nature kind whose geometry only exists in the viewport — text glyphs built
@@ -74,7 +84,7 @@ function facetedLooseCutters(shapes: WorkplaneShape[]): WorkplaneShape[] {
     && !shape.suppressed
     && !shape.csg?.suppressed
     && !isEvaluatedCsgBody(shape)
-    && !shapeHasExactBrepSource(shape));
+    && !shapeExportsExact(shape));
 }
 
 /** Names of the faceted cutters that reach this part, in the STEP writer's own terms. */
@@ -117,7 +127,7 @@ export function buildStepExportPreflight(shapes: WorkplaneShape[]): StepPrefligh
             ? `cut by ${first} — a faceted cutter, so the cut walls are faceted`
             : `cut by ${reaching.length} faceted cutters, so the cut walls are faceted`;
         } else {
-          detail = shape.importedMesh?.brepStep || shape.cadBrep
+          detail = importedMeshHasExactSource(shape.importedMesh) || shape.cadBrep
             ? "stored B-Rep"
             : "native analytic solid";
         }

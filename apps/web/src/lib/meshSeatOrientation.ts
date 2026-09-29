@@ -15,6 +15,8 @@ const EPSILON = 1e-10;
 const SEAT_TRIANGLE_BUDGET = 20000;
 const MAX_PLANE_CLUSTERS = 512;
 
+export type MeshSeatMode = "lay-flat" | "keep-orientation";
+
 export type SeatedTriangleSoup = {
   positions: number[];
   normals: number[] | undefined;
@@ -53,14 +55,32 @@ export function quaternionToAxisAngleDegrees(quaternion: THREE.Quaternion): {
   };
 }
 
-function meshBoundsExtent(positions: number[]) {
+/** An indexed triangle mesh: `indices` are vertex numbers into xyz `positions`. */
+export type IndexedMeshSample = {
+  positions: ArrayLike<number>;
+  indices: ArrayLike<number>;
+};
+
+/**
+ * Triangle access shared by the soup and indexed seat paths, so both cluster the same triangles
+ * in the same order and pick the same seat.
+ */
+type SeatTriangleSource = {
+  triangleCount: number;
+  extent: number;
+  /** Mean of every triangle corner (a vertex counts once per triangle that uses it). */
+  meanCorner: THREE.Vector3;
+  readTriangle: (triangle: number, a: THREE.Vector3, b: THREE.Vector3, c: THREE.Vector3) => void;
+};
+
+function positionsBoundsExtent(positions: ArrayLike<number>) {
   let minX = Infinity;
   let minY = Infinity;
   let minZ = Infinity;
   let maxX = -Infinity;
   let maxY = -Infinity;
   let maxZ = -Infinity;
-  for (let i = 0; i < positions.length; i += 3) {
+  for (let i = 0; i + 2 < positions.length; i += 3) {
     const x = positions[i];
     const y = positions[i + 1];
     const z = positions[i + 2];
@@ -71,16 +91,90 @@ function meshBoundsExtent(positions: number[]) {
     maxY = Math.max(maxY, y);
     maxZ = Math.max(maxZ, z);
   }
-  return Math.hypot(maxX - minX, maxY - minY, maxZ - minZ) || 1;
+  return { minX, minY, minZ, maxX, maxY, maxZ };
 }
 
-function findLargestFlatPlane(positions: number[]): PlaneCluster | null {
-  const triangleCount = Math.floor(positions.length / 9);
+function extentOfBounds(bounds: ReturnType<typeof positionsBoundsExtent>) {
+  return Math.hypot(bounds.maxX - bounds.minX, bounds.maxY - bounds.minY, bounds.maxZ - bounds.minZ) || 1;
+}
+
+function soupTriangleSource(positions: number[]): SeatTriangleSource {
+  const meanCorner = new THREE.Vector3();
+  let count = 0;
+  for (let i = 0; i + 2 < positions.length; i += 3) {
+    meanCorner.x += positions[i];
+    meanCorner.y += positions[i + 1];
+    meanCorner.z += positions[i + 2];
+    count += 1;
+  }
+  if (count > 0) meanCorner.multiplyScalar(1 / count);
+  return {
+    triangleCount: Math.floor(positions.length / 9),
+    extent: extentOfBounds(positionsBoundsExtent(positions)),
+    meanCorner,
+    readTriangle: (triangle, a, b, c) => {
+      const base = triangle * 9;
+      a.set(positions[base], positions[base + 1], positions[base + 2]);
+      b.set(positions[base + 3], positions[base + 4], positions[base + 5]);
+      c.set(positions[base + 6], positions[base + 7], positions[base + 8]);
+    },
+  };
+}
+
+function indexedTriangleSource(meshes: IndexedMeshSample[]): SeatTriangleSource {
+  const bounds = { minX: Infinity, minY: Infinity, minZ: Infinity, maxX: -Infinity, maxY: -Infinity, maxZ: -Infinity };
+  const meanCorner = new THREE.Vector3();
+  let corners = 0;
+  const starts: number[] = [];
+  let triangleCount = 0;
+  for (const mesh of meshes) {
+    const meshBounds = positionsBoundsExtent(mesh.positions);
+    bounds.minX = Math.min(bounds.minX, meshBounds.minX);
+    bounds.minY = Math.min(bounds.minY, meshBounds.minY);
+    bounds.minZ = Math.min(bounds.minZ, meshBounds.minZ);
+    bounds.maxX = Math.max(bounds.maxX, meshBounds.maxX);
+    bounds.maxY = Math.max(bounds.maxY, meshBounds.maxY);
+    bounds.maxZ = Math.max(bounds.maxZ, meshBounds.maxZ);
+    const usable = mesh.indices.length - (mesh.indices.length % 3);
+    for (let i = 0; i < usable; i += 1) {
+      const v = mesh.indices[i] * 3;
+      meanCorner.x += mesh.positions[v];
+      meanCorner.y += mesh.positions[v + 1];
+      meanCorner.z += mesh.positions[v + 2];
+    }
+    corners += usable;
+    starts.push(triangleCount);
+    triangleCount += usable / 3;
+  }
+  if (corners > 0) meanCorner.multiplyScalar(1 / corners);
+
+  // Triangles are read in ascending order, so a forward-only cursor finds the owning mesh.
+  let cursor = 0;
+  return {
+    triangleCount,
+    extent: extentOfBounds(bounds),
+    meanCorner,
+    readTriangle: (triangle, a, b, c) => {
+      if (triangle < starts[cursor]) cursor = 0;
+      while (cursor + 1 < starts.length && triangle >= starts[cursor + 1]) cursor += 1;
+      const { positions, indices } = meshes[cursor];
+      const base = (triangle - starts[cursor]) * 3;
+      const ia = indices[base] * 3;
+      const ib = indices[base + 1] * 3;
+      const ic = indices[base + 2] * 3;
+      a.set(positions[ia], positions[ia + 1], positions[ia + 2]);
+      b.set(positions[ib], positions[ib + 1], positions[ib + 2]);
+      c.set(positions[ic], positions[ic + 1], positions[ic + 2]);
+    },
+  };
+}
+
+function findLargestFlatPlane(source: SeatTriangleSource): PlaneCluster | null {
+  const { triangleCount, extent } = source;
   if (triangleCount < 1) {
     return null;
   }
 
-  const extent = meshBoundsExtent(positions);
   const offsetTolerance = Math.max(extent * 1e-4, 1e-5);
   const clusters: PlaneCluster[] = [];
   let totalArea = 0;
@@ -98,10 +192,7 @@ function findLargestFlatPlane(positions: number[]): PlaneCluster | null {
   const stride = Math.max(1, Math.ceil(triangleCount / SEAT_TRIANGLE_BUDGET));
 
   for (let t = 0; t < triangleCount; t += stride) {
-    const base = t * 9;
-    a.set(positions[base], positions[base + 1], positions[base + 2]);
-    b.set(positions[base + 3], positions[base + 4], positions[base + 5]);
-    c.set(positions[base + 6], positions[base + 7], positions[base + 8]);
+    source.readTriangle(t, a, b, c);
     ab.subVectors(b, a);
     ac.subVectors(c, a);
     normal.crossVectors(ab, ac);
@@ -202,39 +293,51 @@ function applyQuaternionToTriangleSoup(
 export function seatTriangleSoupOnLargestFlatSurface(
   positions: number[],
   normals?: number[],
+  mode: MeshSeatMode = "lay-flat",
 ): SeatedTriangleSoup {
-  const identity = new THREE.Quaternion();
-  const plane = findLargestFlatPlane(positions);
-  if (!plane) {
+  if (mode === "keep-orientation") {
     return {
       positions: positions.slice(),
       normals: normals ? normals.slice() : undefined,
-      rotation: identity,
+      rotation: new THREE.Quaternion(),
     };
   }
-
-  const down = new THREE.Vector3(0, -1, 0);
-  let rotation = new THREE.Quaternion().setFromUnitVectors(plane.normal.clone().normalize(), down);
-
-  // Ensure the solid lies above the chosen face (not hanging below a "ceiling").
-  const trial = applyQuaternionToTriangleSoup(positions, undefined, rotation);
-  let sumY = 0;
-  let count = 0;
-  for (let i = 1; i < trial.positions.length; i += 3) {
-    sumY += trial.positions[i];
-    count += 1;
-  }
-  const sample = plane.samplePoint.clone().applyQuaternion(rotation);
-  const centroidY = count ? sumY / count : sample.y;
-  if (centroidY < sample.y - EPSILON) {
-    const flip = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
-    rotation = flip.multiply(rotation);
-  }
-
+  const rotation = seatRotationForSource(soupTriangleSource(positions));
   const seated = applyQuaternionToTriangleSoup(positions, normals, rotation);
   return {
     positions: seated.positions,
     normals: seated.normals,
     rotation,
   };
+}
+
+/**
+ * Lay-flat seat rotation for indexed meshes (one or many bodies seated together), without
+ * expanding them into a triangle soup. Picks the same seat the soup path would for the same
+ * triangles.
+ */
+export function seatRotationForIndexedMeshes(meshes: IndexedMeshSample[]): THREE.Quaternion {
+  return seatRotationForSource(indexedTriangleSource(meshes));
+}
+
+function seatRotationForSource(source: SeatTriangleSource): THREE.Quaternion {
+  const plane = findLargestFlatPlane(source);
+  if (!plane) {
+    return new THREE.Quaternion();
+  }
+
+  const down = new THREE.Vector3(0, -1, 0);
+  let rotation = new THREE.Quaternion().setFromUnitVectors(plane.normal.clone().normalize(), down);
+
+  // Ensure the solid lies above the chosen face (not hanging below a "ceiling"). Rotation is
+  // linear, so the mean rotated corner height is the rotated mean corner's height.
+  const sample = plane.samplePoint.clone().applyQuaternion(rotation);
+  const centroidY = source.triangleCount > 0
+    ? source.meanCorner.clone().applyQuaternion(rotation).y
+    : sample.y;
+  if (centroidY < sample.y - EPSILON) {
+    const flip = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), Math.PI);
+    rotation = flip.multiply(rotation);
+  }
+  return rotation;
 }

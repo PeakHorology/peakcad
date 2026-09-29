@@ -51,6 +51,14 @@ function readStaticExportFlag() {
 const DESKTOP_SHELL_STORAGE_KEY = "peakcad.desktopShell";
 
 /**
+ * `typeof window` is folded to a constant in client bundles, which is wrong inside Web Workers
+ * (they are built as client code but have no `window`), so look it up at runtime.
+ */
+function browserWindow(): Window | undefined {
+  return (globalThis as { window?: Window }).window;
+}
+
+/**
  * True when running inside PeakCAD's own desktop shell.
  *
  * `window.peakcadDesktop` is injected only once the page has finished loading, yet the hardware
@@ -61,7 +69,8 @@ const DESKTOP_SHELL_STORAGE_KEY = "peakcad.desktopShell";
  * query string.
  */
 export function isDesktopShell() {
-  if (typeof window === "undefined") return readStaticExportFlag();
+  const window = browserWindow();
+  if (!window) return readStaticExportFlag();
   if (Boolean((window as Window & { peakcadDesktop?: boolean }).peakcadDesktop)) return true;
   try {
     if (new URLSearchParams(window.location.search).get("shell") === "desktop") {
@@ -137,7 +146,7 @@ export function getHardwareProfile(): HardwareProfile {
 let cachedProfile: HardwareProfile | null = null;
 
 export function hardwareProfile() {
-  if (typeof window === "undefined") {
+  if (!browserWindow()) {
     return getHardwareProfile();
   }
   cachedProfile ??= getHardwareProfile();

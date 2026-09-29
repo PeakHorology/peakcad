@@ -34,6 +34,13 @@ function meshVaultKey(path: string) {
   return path;
 }
 
+/** Triangles in a mesh payload: indexed meshes count index triples, soups count 9-float corners. */
+export function importedMeshTriangleCount(mesh: { positions: ArrayLike<number>; indices?: ArrayLike<number> }) {
+  return mesh.indices && mesh.indices.length >= 3
+    ? Math.floor(mesh.indices.length / 3)
+    : Math.floor(mesh.positions.length / 9);
+}
+
 function hashNumberArray(values: ArrayLike<number>, sampleCount = 48) {
   let hash = values.length + 2166136261;
   if (values.length === 0) return hash >>> 0;
@@ -257,7 +264,7 @@ export function expandHistoryShapes(
           triangleCount:
             next.importedMesh.triangleCount > 0
               ? next.importedMesh.triangleCount
-              : Math.floor(blob.positions.length / 9),
+              : importedMeshTriangleCount(blob),
         },
       };
     }

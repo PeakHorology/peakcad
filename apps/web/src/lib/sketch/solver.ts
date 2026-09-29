@@ -33,13 +33,15 @@ function lineEndpoints(doc: SketchDoc, lineId: string, points: Map<string, Point
   return { line, a, b };
 }
 
-function applySoftPull(target: PointVar, goalX: number, goalZ: number, weight: number) {
-  if (target.fixed) return 0;
-  const dx = (goalX - target.x) * weight;
-  const dz = (goalZ - target.z) * weight;
-  target.x += dx;
-  target.z += dz;
-  return Math.hypot(dx, dz);
+/** Place a line on an exact direction and length. A fixed end stays put and the free end moves. */
+function placeLine(a: PointVar, b: PointVar, dirX: number, dirZ: number, length: number) {
+  if (a.fixed && !b.fixed) return applyExact(b, a.x + dirX * length, a.z + dirZ * length);
+  if (!a.fixed && b.fixed) return applyExact(a, b.x - dirX * length, b.z - dirZ * length);
+  const mx = (a.x + b.x) / 2;
+  const mz = (a.z + b.z) / 2;
+  const hx = (dirX * length) / 2;
+  const hz = (dirZ * length) / 2;
+  return applyExact(a, mx - hx, mz - hz) + applyExact(b, mx + hx, mz + hz);
 }
 
 /** Exact set for hard constraints — residual is the prior error that was removed. */
@@ -129,15 +131,17 @@ function solveOnce(doc: SketchDoc, points: Map<string, PointVar>): number {
         let tx = v1x / len1;
         let tz = v1z / len1;
         if (c.kind === "perpendicular") {
-          const nx = -tz;
-          const nz = tx;
-          tx = nx;
-          tz = nz;
+          tx = -tz;
+          tz = v1x / len1;
         }
-        const len2 = Math.hypot(l2.b.x - l2.a.x, l2.b.z - l2.a.z) || 1;
-        const mid = { x: (l2.a.x + l2.b.x) / 2, z: (l2.a.z + l2.b.z) / 2 };
-        error += applySoftPull(l2.a, mid.x - (tx * len2) / 2, mid.z - (tz * len2) / 2, 0.35);
-        error += applySoftPull(l2.b, mid.x + (tx * len2) / 2, mid.z + (tz * len2) / 2, 0.35);
+        const v2x = l2.b.x - l2.a.x;
+        const v2z = l2.b.z - l2.a.z;
+        if (v2x * tx + v2z * tz < 0) {
+          tx = -tx;
+          tz = -tz;
+        }
+        const len2 = Math.hypot(v2x, v2z) || 1;
+        error += placeLine(l2.a, l2.b, tx, tz, len2);
         break;
       }
       case "equal": {
@@ -146,27 +150,21 @@ function solveOnce(doc: SketchDoc, points: Map<string, PointVar>): number {
         const l2 = lineEndpoints(doc, c.entityIds[1], points);
         if (!l1 || !l2) break;
         const len1 = Math.hypot(l1.b.x - l1.a.x, l1.b.z - l1.a.z);
-        const len2 = Math.hypot(l2.b.x - l2.a.x, l2.b.z - l2.a.z);
+        const v2x = l2.b.x - l2.a.x;
+        const v2z = l2.b.z - l2.a.z;
+        const len2 = Math.hypot(v2x, v2z);
         if (len2 < 1e-9) break;
-        const scale = len1 / len2;
-        const mid = { x: (l2.a.x + l2.b.x) / 2, z: (l2.a.z + l2.b.z) / 2 };
-        const hx = ((l2.b.x - l2.a.x) * scale) / 2;
-        const hz = ((l2.b.z - l2.a.z) * scale) / 2;
-        error += applySoftPull(l2.a, mid.x - hx, mid.z - hz, 0.35);
-        error += applySoftPull(l2.b, mid.x + hx, mid.z + hz, 0.35);
+        error += placeLine(l2.a, l2.b, v2x / len2, v2z / len2, len1);
         break;
       }
       case "midpoint": {
         const line = c.entityIds[0] ? lineEndpoints(doc, c.entityIds[0], points) : null;
         const midPoint = c.pointIds?.[0] ? points.get(c.pointIds[0]) : null;
         if (!line || !midPoint) break;
-        const mx = (line.a.x + line.b.x) / 2;
-        const mz = (line.a.z + line.b.z) / 2;
-        error += applySoftPull(midPoint, mx, mz, 0.5);
+        error += applyExact(midPoint, (line.a.x + line.b.x) / 2, (line.a.z + line.b.z) / 2);
         break;
       }
       case "concentric": {
-        // Keep circle centers coincident when two circle center points listed
         const ids = c.entityIds
           .map((id) => {
             const circle = doc.entities.find((e) => e.id === id && e.kind === "circle");
@@ -176,10 +174,11 @@ function solveOnce(doc: SketchDoc, points: Map<string, PointVar>): number {
         if (ids.length >= 2) {
           const a = points.get(ids[0])!;
           const b = points.get(ids[1])!;
-          const mx = (a.x + b.x) / 2;
-          const mz = (a.z + b.z) / 2;
-          error += applySoftPull(a, mx, mz, 0.5);
-          error += applySoftPull(b, mx, mz, 0.5);
+          const anchors = [a, b].filter((p) => p.fixed);
+          const mx = anchors.length ? anchors.reduce((s, p) => s + p.x, 0) / anchors.length : (a.x + b.x) / 2;
+          const mz = anchors.length ? anchors.reduce((s, p) => s + p.z, 0) / anchors.length : (a.z + b.z) / 2;
+          error += applyExact(a, mx, mz);
+          error += applyExact(b, mx, mz);
         }
         break;
       }
@@ -255,11 +254,7 @@ function applyDimension(doc: SketchDoc, dim: SketchDimension, points: Map<string
     const a1 = Math.atan2(l1.b.z - l1.a.z, l1.b.x - l1.a.x);
     const target = a1 + (dim.value * Math.PI) / 180;
     const len2 = Math.hypot(l2.b.x - l2.a.x, l2.b.z - l2.a.z) || 1;
-    const mid = { x: (l2.a.x + l2.b.x) / 2, z: (l2.a.z + l2.b.z) / 2 };
-    const hx = (Math.cos(target) * len2) / 2;
-    const hz = (Math.sin(target) * len2) / 2;
-    error += applySoftPull(l2.a, mid.x - hx, mid.z - hz, 0.3);
-    error += applySoftPull(l2.b, mid.x + hx, mid.z + hz, 0.3);
+    error += placeLine(l2.a, l2.b, Math.cos(target), Math.sin(target), len2);
   }
   return error;
 }
@@ -292,11 +287,9 @@ function applyTangent(doc: SketchDoc, entityIds: string[], points: Map<string, P
     const dist = (center.x - ends.a.x) * nx + (center.z - ends.a.z) * nz;
     const target = circle.radius * Math.sign(dist || 1);
     const delta = target - dist;
-    // Split correction: nudge center along normal, and line the opposite way.
-    let error = applySoftPull(center, center.x + nx * delta * 0.5, center.z + nz * delta * 0.5, 0.4);
-    error += applySoftPull(ends.a, ends.a.x - nx * delta * 0.25, ends.a.z - nz * delta * 0.25, 0.35);
-    error += applySoftPull(ends.b, ends.b.x - nx * delta * 0.25, ends.b.z - nz * delta * 0.25, 0.35);
-    return error;
+    if (!center.fixed) return applyExact(center, center.x + nx * delta, center.z + nz * delta);
+    return applyExact(ends.a, ends.a.x - nx * delta, ends.a.z - nz * delta)
+      + applyExact(ends.b, ends.b.x - nx * delta, ends.b.z - nz * delta);
   }
 
   // Circle–circle: external tangent |d − (r1+r2)| → 0
@@ -313,9 +306,7 @@ function applyTangent(doc: SketchDoc, entityIds: string[], points: Map<string, P
     const mz = (c1.z + c2.z) / 2;
     const hx = (dx * scale) / 2;
     const hz = (dz * scale) / 2;
-    let error = applySoftPull(c1, mx - hx, mz - hz, 0.4);
-    error += applySoftPull(c2, mx + hx, mz + hz, 0.4);
-    return error;
+    return applyExact(c1, mx - hx, mz - hz) + applyExact(c2, mx + hx, mz + hz);
   }
 
   return 0;
@@ -360,23 +351,33 @@ function applySymmetry(
 
   const pA = resolvePoint(pairIds[0]);
   const pB = resolvePoint(pairIds[1]);
-  if (pA && pB) {
-    const rA = reflect(pA.x, pA.z);
-    const rB = reflect(pB.x, pB.z);
-    let error = applySoftPull(pB, rA.x, rA.z, 0.4);
-    error += applySoftPull(pA, rB.x, rB.z, 0.25);
-    return error;
-  }
+  if (pA && pB) return projectSymmetricPair(pA, pB, reflect);
 
-  // Line–line symmetry: pull midpoints / endpoints toward reflections
   const l1 = lineEndpoints(doc, pairIds[0], points);
   const l2 = lineEndpoints(doc, pairIds[1], points);
   if (!l1 || !l2) return 0;
-  const r1a = reflect(l1.a.x, l1.a.z);
-  const r1b = reflect(l1.b.x, l1.b.z);
-  let error = applySoftPull(l2.a, r1a.x, r1a.z, 0.35);
-  error += applySoftPull(l2.b, r1b.x, r1b.z, 0.35);
-  return error;
+  return projectSymmetricPair(l1.a, l2.a, reflect) + projectSymmetricPair(l1.b, l2.b, reflect);
+}
+
+/** One exact step onto B = reflect(A). Both free: split the gap. One fixed: the other snaps. */
+function projectSymmetricPair(
+  a: PointVar,
+  b: PointVar,
+  reflect: (x: number, z: number) => { x: number; z: number },
+) {
+  if (a.fixed && !b.fixed) {
+    const reflected = reflect(a.x, a.z);
+    return applyExact(b, reflected.x, reflected.z);
+  }
+  if (!a.fixed && b.fixed) {
+    const reflected = reflect(b.x, b.z);
+    return applyExact(a, reflected.x, reflected.z);
+  }
+  const mirrored = reflect(b.x, b.z);
+  const ax = (a.x + mirrored.x) / 2;
+  const az = (a.z + mirrored.z) / 2;
+  const bx = reflect(ax, az);
+  return applyExact(a, ax, az) + applyExact(b, bx.x, bx.z);
 }
 
 function constraintDofWeight(kind: string): number {
@@ -441,7 +442,150 @@ function unsatisfiedDrivingDimensionIds(doc: SketchDoc, points: Map<string, Poin
   return unsatisfied;
 }
 
-function estimateDof(doc: SketchDoc, points: Map<string, PointVar>, lastError: number): { dof: number; status: SketchDefinitionStatus; conflicts: string[] } {
+const GEOMETRY_TOLERANCE = 1e-3;
+
+function lineVector(ends: { a: PointVar; b: PointVar }) {
+  return { x: ends.b.x - ends.a.x, z: ends.b.z - ends.a.z, len: Math.hypot(ends.b.x - ends.a.x, ends.b.z - ends.a.z) };
+}
+
+/** How far the geometry still is from a constraint, in millimetres. Zero when it already holds. */
+function constraintResidual(doc: SketchDoc, constraint: { kind: string; entityIds: string[]; pointIds?: string[] }, points: Map<string, PointVar>): number {
+  if (constraint.kind === "fix") return 0;
+  if (constraint.kind === "parallel" || constraint.kind === "perpendicular" || constraint.kind === "equal") {
+    if (constraint.entityIds.length < 2) return 0;
+    const l1 = lineEndpoints(doc, constraint.entityIds[0], points);
+    const l2 = lineEndpoints(doc, constraint.entityIds[1], points);
+    if (!l1 || !l2) return 0;
+    const v1 = lineVector(l1);
+    const v2 = lineVector(l2);
+    if (v1.len < 1e-9 || v2.len < 1e-9) return 0;
+    if (constraint.kind === "equal") return Math.abs(v1.len - v2.len);
+    const cross = v1.x * v2.z - v1.z * v2.x;
+    const dot = v1.x * v2.x + v1.z * v2.z;
+    const sin = Math.abs(cross) / (v1.len * v2.len);
+    const cos = Math.abs(dot) / (v1.len * v2.len);
+    return (constraint.kind === "parallel" ? sin : cos) * v2.len;
+  }
+  if (constraint.kind === "midpoint") {
+    const line = constraint.entityIds[0] ? lineEndpoints(doc, constraint.entityIds[0], points) : null;
+    const midPoint = constraint.pointIds?.[0] ? points.get(constraint.pointIds[0]) : null;
+    if (!line || !midPoint) return 0;
+    return Math.hypot(midPoint.x - (line.a.x + line.b.x) / 2, midPoint.z - (line.a.z + line.b.z) / 2);
+  }
+  if (constraint.kind === "concentric") {
+    const ids = constraint.entityIds
+      .map((id) => {
+        const circle = doc.entities.find((e) => e.id === id && e.kind === "circle");
+        return circle && circle.kind === "circle" ? circle.centerId : id;
+      })
+      .filter((id) => points.has(id));
+    if (ids.length < 2) return 0;
+    const a = points.get(ids[0])!;
+    const b = points.get(ids[1])!;
+    return Math.hypot(a.x - b.x, a.z - b.z);
+  }
+  if (constraint.kind === "tangent") {
+    return tangentResidual(doc, constraint.entityIds, points);
+  }
+  if (constraint.kind === "symmetry") {
+    return symmetryResidual(doc, constraint, points);
+  }
+  if (constraint.kind === "horizontal" || constraint.kind === "vertical") {
+    const line = constraint.entityIds[0] ? lineEndpoints(doc, constraint.entityIds[0], points) : null;
+    if (line) {
+      return constraint.kind === "horizontal"
+        ? Math.abs(line.a.z - line.b.z)
+        : Math.abs(line.a.x - line.b.x);
+    }
+    if (constraint.pointIds && constraint.pointIds.length >= 2) {
+      const a = points.get(constraint.pointIds[0]);
+      const b = points.get(constraint.pointIds[1]);
+      if (!a || !b) return 0;
+      return constraint.kind === "horizontal" ? Math.abs(a.z - b.z) : Math.abs(a.x - b.x);
+    }
+    return 0;
+  }
+  if (constraint.kind === "coincident") {
+    const ids = [...(constraint.pointIds ?? []), ...constraint.entityIds.filter((id) => points.has(id))];
+    const pts = ids.map((id) => points.get(id)).filter((point): point is PointVar => Boolean(point));
+    if (pts.length < 2) return 0;
+    const ax = pts.reduce((sum, point) => sum + point.x, 0) / pts.length;
+    const az = pts.reduce((sum, point) => sum + point.z, 0) / pts.length;
+    return Math.max(...pts.map((point) => Math.hypot(point.x - ax, point.z - az)));
+  }
+  return 0;
+}
+
+function tangentResidual(doc: SketchDoc, entityIds: string[], points: Map<string, PointVar>): number {
+  if (entityIds.length < 2) return 0;
+  const a = doc.entities.find((e) => e.id === entityIds[0]);
+  const b = doc.entities.find((e) => e.id === entityIds[1]);
+  if (!a || !b) return 0;
+  const line = a.kind === "line" ? a : b.kind === "line" ? b : null;
+  const circle = a.kind === "circle" ? a : b.kind === "circle" ? b : null;
+  if (line && circle && circle.kind === "circle") {
+    const ends = lineEndpoints(doc, line.id, points);
+    const center = points.get(circle.centerId);
+    if (!ends || !center) return 0;
+    const v = lineVector(ends);
+    if (v.len < 1e-9) return 0;
+    const dist = Math.abs(((center.x - ends.a.x) * (-v.z) + (center.z - ends.a.z) * v.x) / v.len);
+    return Math.abs(dist - circle.radius);
+  }
+  if (a.kind === "circle" && b.kind === "circle") {
+    const c1 = points.get(a.centerId);
+    const c2 = points.get(b.centerId);
+    if (!c1 || !c2) return 0;
+    return Math.abs(Math.hypot(c2.x - c1.x, c2.z - c1.z) - (a.radius + b.radius));
+  }
+  return 0;
+}
+
+function symmetryResidual(
+  doc: SketchDoc,
+  constraint: { entityIds: string[]; pointIds?: string[] },
+  points: Map<string, PointVar>,
+): number {
+  const axis = lineEndpoints(doc, constraint.entityIds[constraint.entityIds.length - 1], points);
+  if (!axis) return 0;
+  const ax = axis.b.x - axis.a.x;
+  const az = axis.b.z - axis.a.z;
+  const len2 = ax * ax + az * az || 1;
+  const reflect = (x: number, z: number) => {
+    const t = ((x - axis.a.x) * ax + (z - axis.a.z) * az) / len2;
+    const projX = axis.a.x + ax * t;
+    const projZ = axis.a.z + az * t;
+    return { x: 2 * projX - x, z: 2 * projZ - z };
+  };
+  const pairIds = (constraint.pointIds && constraint.pointIds.length >= 2)
+    ? constraint.pointIds.slice(0, 2)
+    : constraint.entityIds.slice(0, 2);
+  const pointOf = (id: string) => points.get(id) ?? null;
+  const pA = pointOf(pairIds[0]);
+  const pB = pointOf(pairIds[1]);
+  if (pA && pB) {
+    const mirrored = reflect(pA.x, pA.z);
+    return Math.hypot(pB.x - mirrored.x, pB.z - mirrored.z);
+  }
+  const l1 = lineEndpoints(doc, pairIds[0], points);
+  const l2 = lineEndpoints(doc, pairIds[1], points);
+  if (!l1 || !l2) return 0;
+  const ra = reflect(l1.a.x, l1.a.z);
+  const rb = reflect(l1.b.x, l1.b.z);
+  return Math.hypot(l2.a.x - ra.x, l2.a.z - ra.z) + Math.hypot(l2.b.x - rb.x, l2.b.z - rb.z);
+}
+
+function unsatisfiedConstraintIds(
+  doc: SketchDoc,
+  points: Map<string, PointVar>,
+  constraints: Array<{ id: string; kind: string; entityIds: string[]; pointIds?: string[] }>,
+): string[] {
+  return constraints
+    .filter((constraint) => constraintResidual(doc, constraint, points) > GEOMETRY_TOLERANCE)
+    .map((constraint) => constraint.id);
+}
+
+function estimateDof(doc: SketchDoc, points: Map<string, PointVar>, _lastError: number): { dof: number; status: SketchDefinitionStatus; conflicts: string[] } {
   const freeVars = [...points.values()].filter((p) => !p.fixed).length * 2;
   const circleDof = doc.entities.filter((e) => e.kind === "circle" && !e.fixed).length;
   const totalVars = freeVars + circleDof;
@@ -459,19 +603,10 @@ function estimateDof(doc: SketchDoc, points: Map<string, PointVar>, lastError: n
     conflicts.push("Too many constraints or dimensions for the available degrees of freedom.");
     return { dof: 0, status: "over-constrained", conflicts };
   }
-  // Residual stayed high on a fully/over-constrained sketch → report conflict ids.
-  if (lastError > 0.05 && removed >= totalVars && activeConstraints.length > 0) {
-    for (const c of activeConstraints) {
-      if (c.kind === "fix") continue;
-      conflicts.push(c.id);
-    }
-    if (conflicts.length) {
-      return { dof: 0, status: "over-constrained", conflicts: conflicts.slice(0, 8) };
-    }
-  }
-  // The geometry does not match what the user typed. Never report this as solved: an
-  // abandoned dimension is exactly the kind of silent error that reaches the machine shop.
-  const unsatisfied = unsatisfiedDrivingDimensionIds(doc, points);
+  // A pull that did not land is an unsolved sketch, not an over-constrained one.
+  // Fully defined is reserved for geometry that actually matches every constraint.
+  const unsatisfiedConstraints = unsatisfiedConstraintIds(doc, points, activeConstraints);
+  const unsatisfied = [...unsatisfiedConstraints, ...unsatisfiedDrivingDimensionIds(doc, points)];
   if (unsatisfied.length) {
     return { dof, status: "unsolved", conflicts: unsatisfied.slice(0, 8) };
   }
@@ -480,8 +615,8 @@ function estimateDof(doc: SketchDoc, points: Map<string, PointVar>, lastError: n
 }
 
 /**
- * Constraint solve: hard projectors for coincident / H / V / linear driving dims,
- * soft pulls for parallel / perp / equal / tangent / symmetry. Writes points back.
+ * Constraint solve. Geometric constraints and driving dimensions snap in one step.
+ * A sketch is fully defined only when that snap actually landed.
  */
 export function solveSketchDoc(input: SketchDoc, iterations = 40): SketchSolveResult {
   const doc = cloneSketchDoc(input);

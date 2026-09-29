@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, nativeImage, shell } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, shell } = require("electron");
 const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
@@ -51,6 +51,50 @@ function grantOpenPath(filePath) {
 
 let pendingOpenPath = grantOpenPath(findPeakcadArg(process.argv));
 
+/** License files ship in resources/ when packaged; from source they live in the repo and the staged legal folder. */
+function legalFilePath(name) {
+  if (app.isPackaged) {
+    return name === "LICENSE.txt" ? path.join(process.resourcesPath, "LICENSE.txt") : path.join(process.resourcesPath, "legal", name);
+  }
+  const repoRoot = path.join(__dirname, "..");
+  return name === "LICENSE.txt" ? path.join(repoRoot, "LICENSE") : path.join(repoRoot, "apps", "web", "public", "legal", name);
+}
+
+function openLegalFile(name) {
+  const filePath = legalFilePath(name);
+  if (!fs.existsSync(filePath)) {
+    dialog.showErrorBox("PeakCAD", `Could not find ${name}. Reinstall PeakCAD to restore the license files.`);
+    return;
+  }
+  void shell.openPath(filePath);
+}
+
+function showAboutDialog() {
+  const options = {
+    type: "info",
+    title: "About PeakCAD",
+    message: `PeakCAD ${app.getVersion()}`,
+    detail: [
+      "Copyright © PeakHorologyLLC",
+      "",
+      "PeakCAD is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.",
+      "",
+      "PeakCAD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.",
+      "",
+      "PeakCAD includes OpenCascade Technology (LGPL-2.1 with the Open CASCADE exception) and other third-party components under their own licenses.",
+    ].join("\n"),
+    buttons: ["OK", "View License", "Third-Party Notices"],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  };
+  const pending = mainWindow ? dialog.showMessageBox(mainWindow, options) : dialog.showMessageBox(options);
+  void pending.then(({ response }) => {
+    if (response === 1) openLegalFile("LICENSE.txt");
+    else if (response === 2) openLegalFile("THIRD-PARTY-NOTICES.txt");
+  });
+}
+
 function installFileMenu() {
   const sendMenu = (action) => {
     mainWindow?.webContents.send("peakcad:menu", action);
@@ -72,6 +116,16 @@ function installFileMenu() {
       { role: "editMenu" },
       { role: "viewMenu" },
       { role: "windowMenu" },
+      {
+        role: "help",
+        submenu: [
+          { label: "About PeakCAD", click: () => showAboutDialog() },
+          { type: "separator" },
+          { label: "License (GPL-3.0-or-later)", click: () => openLegalFile("LICENSE.txt") },
+          { label: "Third-Party Notices", click: () => openLegalFile("THIRD-PARTY-NOTICES.txt") },
+          { label: "Source Code Offer", click: () => openLegalFile("SOURCE-OFFER.txt") },
+        ],
+      },
     ]),
   );
 }
@@ -219,6 +273,40 @@ function isAppUrl(url, appOrigin) {
   }
 }
 
+let saveBeforeCloseRequestId = 0;
+
+/**
+ * Runs the renderer's explicit Save (exact-STEP bake + project persist) and resolves whether it
+ * succeeded. Resolves false if the page goes away before answering.
+ */
+function requestRendererSave(window) {
+  return new Promise((resolve) => {
+    const contents = window.webContents;
+    saveBeforeCloseRequestId += 1;
+    const requestId = saveBeforeCloseRequestId;
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      ipcMain.removeListener("peakcad:save-before-close-result", onResult);
+      contents.removeListener("render-process-gone", onGone);
+      contents.removeListener("destroyed", onGone);
+      contents.removeListener("did-start-loading", onGone);
+      resolve(ok);
+    };
+    const onResult = (event, id, ok) => {
+      if (event.sender !== contents || id !== requestId) return;
+      finish(ok === true);
+    };
+    const onGone = () => finish(false);
+    ipcMain.on("peakcad:save-before-close-result", onResult);
+    contents.on("render-process-gone", onGone);
+    contents.on("destroyed", onGone);
+    contents.on("did-start-loading", onGone);
+    contents.send("peakcad:save-before-close", requestId);
+  });
+}
+
 function createWindow(port) {
   const iconPath = appIconPath();
   const icon = appIconImage();
@@ -248,6 +336,46 @@ function createWindow(port) {
       mainWindow.webContents.send("peakcad:open-path", pendingOpenPath);
       pendingOpenPath = null;
     }
+  });
+
+  const window = mainWindow;
+  let closeRequested = false;
+  let saveBeforeCloseInFlight = false;
+  // "close" fires before the page's beforeunload, so this tells a window close apart from a reload.
+  window.on("close", () => {
+    closeRequested = true;
+  });
+
+  // Electron shows no prompt for a page's beforeunload veto; without this the window just refuses to close.
+  // The page only vetoes while it has unsaved changes, so a clean project closes without asking.
+  window.webContents.on("will-prevent-unload", (event) => {
+    const closing = closeRequested;
+    closeRequested = false;
+    // A Save started from this dialog is still running; stay open until it finishes.
+    if (saveBeforeCloseInFlight) return;
+    const choice = dialog.showMessageBoxSync(window, {
+      type: "question",
+      buttons: ["Save", "Don't save", "Cancel"],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true,
+      title: "PeakCAD",
+      message: closing ? "Save changes before closing?" : "Save changes before reloading?",
+      detail: "The model is autosaved, but exact STEP for new imports is only kept when you save.",
+    });
+    if (choice === 1) {
+      event.preventDefault();
+      return;
+    }
+    if (choice !== 0) return;
+    saveBeforeCloseInFlight = true;
+    void requestRendererSave(window).then((ok) => {
+      saveBeforeCloseInFlight = false;
+      if (!ok || window.isDestroyed()) return;
+      // destroy() skips beforeunload: bodies whose exact STEP could not be baked would otherwise ask again.
+      if (closing) window.destroy();
+      else window.webContents.reload();
+    });
   });
 
   if (icon) {
@@ -356,7 +484,9 @@ app.on("window-all-closed", () => {
   }
 });
 
-app.on("before-quit", () => {
+// Not before-quit: that fires before the window's unsaved-changes prompt, which can cancel the quit
+// (Cancel) or keep the window open while Save runs, and the page still needs its asset server then.
+app.on("will-quit", () => {
   if (server) {
     server.close();
     server = null;

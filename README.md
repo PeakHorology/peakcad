@@ -1,58 +1,62 @@
 <div align="center">
-  <img src="apps/web/public/assets/peakcad/peakcad-logo.png" width="120" alt="PeakCAD logo">
+  <img src="apps/web/public/assets/peakcad/peakcad-logo.png" width="96" alt="PeakCAD logo">
   <h1>PeakCAD</h1>
-  <p><strong>Local CAD</strong> — as approachable as Tinkercad, with real B-Rep STEP when it counts.</p>
+  <p>Local Windows CAD from Peak Horology.<br>Drop a solid, sketch on a face, and export a real B-Rep STEP file.</p>
   <p>
-    <a href="LICENSE"><img alt="GPLv3 license" src="https://img.shields.io/badge/license-GPLv3-blue"></a>
-    <img alt="Local only" src="https://img.shields.io/badge/local--only-no%20account-0ea5e9">
-    <img alt="Beta" src="https://img.shields.io/badge/status-beta-f59e0b">
-    <img alt="Version 0.9.11" src="https://img.shields.io/badge/version-0.9.11-2563eb">
+    <a href="LICENSE"><img alt="GPL-3.0-or-later" src="https://img.shields.io/badge/license-GPL--3.0--or--later-2563eb"></a>
+    <img alt="Version 1.0.0" src="https://img.shields.io/badge/version-1.0.0-0f172a">
+    <img alt="Windows" src="https://img.shields.io/badge/platform-Windows-0ea5e9">
   </p>
 </div>
 
-PeakCAD is a **Windows desktop** CAD app from **PeakHorologyLLC**. Projects stay on your machine. No login. No cloud. No LAN or hosted edition.
+PeakCAD 1.0 is a desktop CAD application. Projects stay on this computer. There is no account, no cloud, and no hosted edition.
 
-## What you can do
+## Features
 
-- Drop primitives (box, cylinder, sphere, cone, pyramid, triangle, torus, tube, polygon, threads, text, …)
-- Solid / hole + **Group** (exact OpenCascade boolean when possible; mesh fallback otherwise)
-- Sketch on a face, extrude / hole / revolve
-- Fillet and chamfer edges (re-apply after remesh — see [Beta limitations](docs/BETA-LIMITATIONS.md))
-- Import STL / STEP / 3MF / SVG · export STL / OBJ / 3MF / **STEP** (exact vs faceted, labeled)
+- Primitives: box, cylinder, sphere, cone, pyramid, polygon, torus, tube, thread, text
+- Sketch on a face, then extrude, cut, or revolve
+- Group, with an exact OpenCascade boolean when the solid supports it
+- Fillet and chamfer
+- Import STL, STEP, 3MF, and SVG
+- Export STL, OBJ, 3MF, and STEP (exact B-Rep when the solid allows it, faceted otherwise)
 
-## Run PeakCAD
+Known limits are listed in [docs/BETA-LIMITATIONS.md](docs/BETA-LIMITATIONS.md).
+
+## Install
+
+From a clone of this repository:
 
 ```bash
 npm install
 npm run package:desktop
 ```
 
-Installers land in `dist-release/` (`PeakCAD-Setup-*.exe`, portable build). Use those — that is the product.
+The installer is written to `dist-release/PeakCAD-Setup-1.0.0.exe`. A portable build is written beside it. Close any running PeakCAD window before you install. Setup upgrades an existing install in place and keeps your projects.
 
-### Build from source (developers)
+Developers can preview the editor locally:
 
 ```bash
 npm install
 npm run dev
 ```
 
-That starts a local preview on this computer only (`http://127.0.0.1:3000`). It is not a hosted or multi-user PeakCAD. See [GETTING-STARTED.md](GETTING-STARTED.md).
+That serves `http://127.0.0.1:3000` on this machine only. See [GETTING-STARTED.md](GETTING-STARTED.md).
 
-## Quality checks
+## Checks
 
 ```bash
 npm run typecheck
 npm test
-npm run test:e2e   # STEP round-trip against OpenCascade
-npm run ci         # typecheck + unit + e2e
+npm run test:e2e
+npm run ci
 ```
 
-## Beta status
-
-PeakCAD **0.9.x is Beta**. Core modeling, multi-body assemblies, hard H/V/coincident dims, sync sketch B-Rep bake before Group, and geometric fillet rematch are ready for real parts. Remaining soft spots (barrel exact bake, soft sketch pulls, no mates): [docs/BETA-LIMITATIONS.md](docs/BETA-LIMITATIONS.md).
+`npm run test:e2e` runs the STEP round-trip against OpenCascade.
 
 ## License
 
 [GPL-3.0-or-later](LICENSE) · © PeakHorologyLLC
 
-PeakCAD builds on the open SketchForge lineage with PeakCAD branding, STEP quality work, and desktop packaging.
+PeakCAD is free software and comes with no warranty. In the app, open **Settings → About** or **Help → About PeakCAD** for the copyright notice, the license, and the written source offer.
+
+Third-party components keep their own licenses. The OpenCascade kernel is LGPL-2.1 with the Open CASCADE exception and ships as a separate `occt-wasm.wasm` file. `npm run stage:legal` writes `THIRD-PARTY-NOTICES.txt` from the installed dependencies. The desktop build ships that file with `LICENSE.txt` and `SOURCE-OFFER.txt`.

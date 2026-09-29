@@ -1,6 +1,6 @@
 # PeakCAD — Getting Started
 
-PeakCAD is a **local Windows desktop** CAD app from **PeakHorologyLLC** (Beta 0.9.x). There is no hosted, browser-SaaS, or LAN edition. See [docs/BETA-LIMITATIONS.md](docs/BETA-LIMITATIONS.md) for known Beta gaps.
+PeakCAD is a **local Windows desktop** CAD app from **PeakHorologyLLC** (1.0). There is no hosted, browser-SaaS, or LAN edition. See [docs/BETA-LIMITATIONS.md](docs/BETA-LIMITATIONS.md) for known limits.
 
 ## Use PeakCAD (the app)
 
@@ -12,8 +12,8 @@ npm run package:desktop
 
 This creates files in the `dist-release/` folder:
 
-- `PeakCAD-Setup-0.9.11.exe` — installer (adds Start Menu + Desktop shortcut; version matches `package.json`)
-- `PeakCAD-0.9.11-portable.exe` — portable build (no install needed; not an upgrader)
+- `PeakCAD-Setup-1.0.0.exe` — installer (adds Start Menu + Desktop shortcut; version matches `package.json`)
+- `PeakCAD-1.0.0-portable.exe` — portable build (no install needed; not an upgrader)
 
 Close any running PeakCAD window before packaging. Run the Setup or portable exe — that is PeakCAD.
 
@@ -21,7 +21,7 @@ Close any running PeakCAD window before packaging. Run the Setup or portable exe
 
 You do **not** need to uninstall PeakCAD first. The Setup installer upgrades in place and keeps your projects/settings.
 
-1. Bump `"version"` in `package.json` (for example `0.9.10` → `0.9.11`)
+1. Bump `"version"` in `package.json` (for example `1.0.0` → `1.0.1`)
 2. Close PeakCAD
 3. Run `npm run package:desktop`
 4. Run the new `PeakCAD-Setup-*.exe` from `dist-release/`

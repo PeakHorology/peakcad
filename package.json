@@ -1,6 +1,6 @@
 {
   "name": "peakcad",
-  "version": "0.9.11",
+  "version": "1.0.0",
   "private": true,
   "license": "GPL-3.0-or-later",
   "author": "PeakHorologyLLC",
@@ -10,11 +10,12 @@
   "scripts": {
     "postinstall": "node scripts/copy-occt-wasm.mjs",
     "copy:occt": "node scripts/copy-occt-wasm.mjs",
-    "predev": "npm run copy:occt",
+    "stage:legal": "node scripts/stage-legal-notices.mjs",
+    "predev": "npm run copy:occt && npm run stage:legal",
     "dev": "next dev apps/web",
-    "prebuild": "npm run copy:occt",
+    "prebuild": "npm run copy:occt && npm run stage:legal",
     "build": "next build apps/web",
-    "preexport": "npm run copy:occt",
+    "preexport": "npm run copy:occt && npm run stage:legal",
     "export": "node scripts/static-export.mjs",
     "verify:static-worker-assets": "node scripts/verify-static-worker-assets.mjs",
     "start": "next start apps/web",
@@ -75,6 +76,9 @@
       "package.json"
     ],
     "asar": true,
+    "asarUnpack": [
+      "apps/web/.next-export/occt/**"
+    ],
     "extraResources": [
       {
         "from": "build/icon.ico",
@@ -83,6 +87,28 @@
       {
         "from": "electron/icon.ico",
         "to": "app-icon.ico"
+      },
+      {
+        "from": "LICENSE",
+        "to": "LICENSE.txt"
+      },
+      {
+        "from": "apps/web/public/legal",
+        "to": "legal"
+      }
+    ],
+    "extraFiles": [
+      {
+        "from": "LICENSE",
+        "to": "LICENSE.txt"
+      },
+      {
+        "from": "apps/web/public/legal/SOURCE-OFFER.txt",
+        "to": "SOURCE-OFFER.txt"
+      },
+      {
+        "from": "apps/web/public/legal/THIRD-PARTY-NOTICES.txt",
+        "to": "THIRD-PARTY-NOTICES.txt"
       }
     ],
     "fileAssociations": [

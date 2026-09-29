@@ -468,6 +468,7 @@ type MeshEdgeRecord = { nx: number; ny: number; nz: number; sharp: boolean };
 export function filterCoplanarDisplayEdges(
   edges: Array<{ points: number[] }>,
   meshPositions: ArrayLike<number>,
+  meshIndices?: ArrayLike<number>,
 ): Array<{ points: number[] }> {
   if (edges.length === 0 || meshPositions.length < 9) return edges;
 
@@ -505,8 +506,14 @@ export function filterCoplanarDisplayEdges(
     }
   };
 
-  for (let i = 0; i + 8 < meshPositions.length; i += 9) {
-    markTriangle(i, i + 3, i + 6);
+  if (meshIndices && meshIndices.length >= 3) {
+    for (let i = 0; i + 2 < meshIndices.length; i += 3) {
+      markTriangle(meshIndices[i] * 3, meshIndices[i + 1] * 3, meshIndices[i + 2] * 3);
+    }
+  } else {
+    for (let i = 0; i + 8 < meshPositions.length; i += 9) {
+      markTriangle(i, i + 3, i + 6);
+    }
   }
 
   return edges.filter((edge) => {

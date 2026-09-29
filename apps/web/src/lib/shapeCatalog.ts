@@ -7,19 +7,19 @@ import type { DisplayQuality, ShapeAsset, WorkplaneShape } from "@/types/sketchf
 export type ToolbarShapeAsset = ShapeAsset & { menuIcon: string };
 
 export const toolbarShapeAssets: ToolbarShapeAsset[] = [
-  { id: "box", name: "Box", src: "assets/sketchforge/shape-icons-gray/box.png", menuIcon: "assets/sketchforge/shape-icons-gray/box.png", kind: "box", color: "#d41721" },
-  { id: "cylinder", name: "Cylinder", src: "assets/sketchforge/shape-icons-gray/cylinder.png", menuIcon: "assets/sketchforge/shape-icons-gray/cylinder.png", kind: "cylinder", color: "#d97813" },
-  { id: "roof", name: "Triangle", src: "assets/sketchforge/shape-icons-gray/roof.png", menuIcon: "assets/sketchforge/shape-icons-gray/roof.png", kind: "roof", color: "#a83c32" },
-  { id: "polygon", name: "Polygon", src: "assets/sketchforge/shape-icons-gray/polygon.png", menuIcon: "assets/sketchforge/shape-icons-gray/polygon.png", kind: "polygon", color: "#3b82f6" },
-  { id: "sphere", name: "Sphere", src: "assets/sketchforge/shape-icons-gray/sphere.png", menuIcon: "assets/sketchforge/shape-icons-gray/sphere.png", kind: "sphere", color: "#0098c7" },
-  { id: "cone", name: "Cone", src: "assets/sketchforge/shape-icons-gray/cone.png", menuIcon: "assets/sketchforge/shape-icons-gray/cone.png", kind: "cone", color: "#6e2786" },
-  { id: "pyramid", name: "Pyramid", src: "assets/sketchforge/shape-icons-gray/pyramid.png", menuIcon: "assets/sketchforge/shape-icons-gray/pyramid.png", kind: "pyramid", color: "#f2cf10" },
-  { id: "round-roof", name: "Round Roof", src: "assets/sketchforge/shape-icons-gray/round-roof.png", menuIcon: "assets/sketchforge/shape-icons-gray/round-roof.png", kind: "roundRoof", color: "#67c4ce" },
-  { id: "half-sphere", name: "Half Sphere", src: "assets/sketchforge/shape-icons-gray/half-sphere.png", menuIcon: "assets/sketchforge/shape-icons-gray/half-sphere.png", kind: "halfSphere", color: "#c9009a" },
-  { id: "torus", name: "Torus", src: "assets/sketchforge/shape-icons-gray/torus.png", menuIcon: "assets/sketchforge/shape-icons-gray/torus.png", kind: "torus", color: "#0098c7" },
-  { id: "tube", name: "Ring", src: "assets/sketchforge/shape-icons-gray/tube.png", menuIcon: "assets/sketchforge/shape-icons-gray/tube.png", kind: "tube", color: "#ce7013" },
-  { id: "text", name: "Text", src: "assets/sketchforge/shape-icons-gray/text.png", menuIcon: "assets/sketchforge/shape-icons-gray/text.png", kind: "text", color: "#cf101b" },
-  { id: "thread", name: "Threads", src: "assets/sketchforge/shape-icons-gray/thread.png", menuIcon: "assets/sketchforge/shape-icons-gray/thread.png", kind: "thread", color: "#d97813" },
+  { id: "box", name: "Box", src: "assets/peakcad/shape-icons/box.png", menuIcon: "assets/peakcad/shape-icons/box.png", kind: "box", color: "#d41721" },
+  { id: "cylinder", name: "Cylinder", src: "assets/peakcad/shape-icons/cylinder.png", menuIcon: "assets/peakcad/shape-icons/cylinder.png", kind: "cylinder", color: "#d97813" },
+  { id: "roof", name: "Triangle", src: "assets/peakcad/shape-icons/roof.png", menuIcon: "assets/peakcad/shape-icons/roof.png", kind: "roof", color: "#a83c32" },
+  { id: "polygon", name: "Polygon", src: "assets/peakcad/shape-icons/polygon.png", menuIcon: "assets/peakcad/shape-icons/polygon.png", kind: "polygon", color: "#3b82f6" },
+  { id: "sphere", name: "Sphere", src: "assets/peakcad/shape-icons/sphere.png", menuIcon: "assets/peakcad/shape-icons/sphere.png", kind: "sphere", color: "#0098c7" },
+  { id: "cone", name: "Cone", src: "assets/peakcad/shape-icons/cone.png", menuIcon: "assets/peakcad/shape-icons/cone.png", kind: "cone", color: "#6e2786" },
+  { id: "pyramid", name: "Pyramid", src: "assets/peakcad/shape-icons/pyramid.png", menuIcon: "assets/peakcad/shape-icons/pyramid.png", kind: "pyramid", color: "#f2cf10" },
+  { id: "round-roof", name: "Round Roof", src: "assets/peakcad/shape-icons/round-roof.png", menuIcon: "assets/peakcad/shape-icons/round-roof.png", kind: "roundRoof", color: "#67c4ce" },
+  { id: "half-sphere", name: "Half Sphere", src: "assets/peakcad/shape-icons/half-sphere.png", menuIcon: "assets/peakcad/shape-icons/half-sphere.png", kind: "halfSphere", color: "#c9009a" },
+  { id: "torus", name: "Torus", src: "assets/peakcad/shape-icons/torus.png", menuIcon: "assets/peakcad/shape-icons/torus.png", kind: "torus", color: "#0098c7" },
+  { id: "tube", name: "Ring", src: "assets/peakcad/shape-icons/tube.png", menuIcon: "assets/peakcad/shape-icons/tube.png", kind: "tube", color: "#ce7013" },
+  { id: "text", name: "Text", src: "assets/peakcad/shape-icons/text.png", menuIcon: "assets/peakcad/shape-icons/text.png", kind: "text", color: "#cf101b" },
+  { id: "thread", name: "Threads", src: "assets/peakcad/shape-icons/thread.png", menuIcon: "assets/peakcad/shape-icons/thread.png", kind: "thread", color: "#d97813" },
 ];
 
 export function sceneShape(shape: Partial<WorkplaneShape> & Pick<WorkplaneShape, "name" | "kind" | "color">): WorkplaneShape {

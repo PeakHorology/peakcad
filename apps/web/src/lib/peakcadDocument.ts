@@ -1,4 +1,4 @@
-import { hydrateClipboardShape, jsonSafeShape } from "@/lib/shapeClipboard";
+import { hydrateClipboardShape, jsonSafeShape } from "@/lib/shapeJson";
 import { normalizeSnapGrid, normalizeWorkspaceSettings } from "@/lib/workplaneSettings";
 import type { EditorHistoryEntry, EditorHistoryMeshBlob } from "@/lib/editorHistory";
 import type { GridSize, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";

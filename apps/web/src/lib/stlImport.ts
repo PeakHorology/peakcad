@@ -1,8 +1,11 @@
 import * as THREE from "three";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 import { createLocalId } from "@/lib/localIds";
-import { seatTriangleSoupOnLargestFlatSurface } from "@/lib/meshSeatOrientation";
-import type { WorkplaneShape } from "@/types/sketchforge";
+import { lengthDisplayUnit } from "@/lib/measurementUnits";
+import { seatTriangleSoupOnLargestFlatSurface, type MeshSeatMode } from "@/lib/meshSeatOrientation";
+import type { WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
+
+export type StlImportUnit = Pick<WorkplaneWorkspaceSettings, "units" | "scale">;
 
 const stlLoader = new STLLoader();
 const SUPPORTED_IMPORT_EXTENSIONS = new Set(["stl", "svg", "3mf"]);
@@ -31,8 +34,9 @@ export function importedShapeFromTriangleSoup(
   rawPositions: number[],
   rawNormals: number[] | undefined,
   sourceFormat: NonNullable<WorkplaneShape["importedMesh"]>["sourceFormat"] = "stl",
+  seatMode: MeshSeatMode = "lay-flat",
 ): WorkplaneShape {
-  return importTriangleSoup(fileName, rawPositions, rawNormals, sourceFormat).shape;
+  return importTriangleSoup(fileName, rawPositions, rawNormals, sourceFormat, seatMode).shape;
 }
 
 export function importTriangleSoup(
@@ -40,8 +44,13 @@ export function importTriangleSoup(
   rawPositions: number[],
   rawNormals: number[] | undefined,
   sourceFormat: NonNullable<WorkplaneShape["importedMesh"]>["sourceFormat"] = "stl",
+  seatMode: MeshSeatMode = "lay-flat",
 ): TriangleSoupImportResult {
-  const seated = seatTriangleSoupOnLargestFlatSurface(rawPositions, rawNormals);
+  const seated = seatTriangleSoupOnLargestFlatSurface(
+    rawPositions,
+    rawNormals,
+    sourceFormat === "stl" ? seatMode : "lay-flat",
+  );
 
   const geometry = new THREE.BufferGeometry();
   geometry.setAttribute("position", new THREE.Float32BufferAttribute(seated.positions, 3));
@@ -126,20 +135,35 @@ export function importExtensionSupported(fileName: string) {
   return SUPPORTED_IMPORT_EXTENSIONS.has(fileExtension(fileName));
 }
 
-export function importedShapeFromStl(fileName: string, buffer: ArrayBuffer): WorkplaneShape {
+/**
+ * Millimetres per STL file unit. STL carries no unit, so one file unit is one workplane unit.
+ * Every shape stores lengths in millimetres and the inspector and canvas divide by the
+ * workplane unit, so a 10-unit STL on an inch workplane reads 10 in exactly like a 10 in box.
+ */
+export function stlMillimetersPerFileUnit(workplaneUnit?: StlImportUnit) {
+  return workplaneUnit ? lengthDisplayUnit(workplaneUnit).millimetersPerUnit : 1;
+}
+
+export function importedShapeFromStl(
+  fileName: string,
+  buffer: ArrayBuffer,
+  seatMode: MeshSeatMode = "lay-flat",
+  workplaneUnit?: StlImportUnit,
+): WorkplaneShape {
   const rawGeometry = stlLoader.parse(buffer);
   const geometry = rawGeometry.index ? rawGeometry.toNonIndexed() : rawGeometry.clone();
   const position = geometry.getAttribute("position");
   const normal = geometry.getAttribute("normal");
   const rawPositions: number[] = [];
   const rawNormals: number[] = [];
+  const unitScale = stlMillimetersPerFileUnit(workplaneUnit);
 
   for (let i = 0; i < position.count; i += 1) {
-    rawPositions.push(position.getX(i), position.getY(i), position.getZ(i));
+    rawPositions.push(position.getX(i) * unitScale, position.getY(i) * unitScale, position.getZ(i) * unitScale);
     if (normal) {
       rawNormals.push(normal.getX(i), normal.getY(i), normal.getZ(i));
     }
   }
 
-  return importedShapeFromTriangleSoup(fileName, rawPositions, rawNormals.length ? rawNormals : undefined);
+  return importedShapeFromTriangleSoup(fileName, rawPositions, rawNormals.length ? rawNormals : undefined, "stl", seatMode);
 }

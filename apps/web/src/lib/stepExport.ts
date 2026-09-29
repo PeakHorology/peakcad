@@ -9,6 +9,7 @@ import {
   localMeshFromImportedShape,
 } from "@/lib/stepFacetedExport";
 import { buildNativeShapeSolid, NATIVE_EXACT_KINDS } from "@/lib/shapeBrep";
+import { importedMeshHasExactSource, resolveImportedBrepStep } from "@/lib/importedBrepSource";
 
 export { aabbsOverlap, shapeYawDegrees, worldAabb, type Aabb };
 
@@ -253,10 +254,12 @@ function toCadZUp(brep: Brep, solid: BrepSolid): BrepSolid {
 
 async function buildImportedBody(brep: Brep, shape: WorkplaneShape): Promise<BuildOutcome> {
   const mesh = shape.importedMesh;
-  if (!mesh?.brepStep) {
+  // STEP imports defer their exportSTEP bake to here (see importedBrepSource).
+  const brepStep = await resolveImportedBrepStep(mesh);
+  if (!mesh || !brepStep) {
     return { skip: "imported mesh has no B-Rep source; re-import as STEP to round-trip" };
   }
-  const imported = await brep.importSTEP(new Blob([mesh.brepStep]));
+  const imported = await brep.importSTEP(new Blob([brepStep]));
   if (!imported.ok) {
     return { skip: "stored B-Rep failed to re-import" };
   }
@@ -403,7 +406,11 @@ async function buildFacetedSolid(brep: Brep, shape: WorkplaneShape): Promise<Bui
   return { solid: body, quality: "faceted" };
 }
 
-async function buildLeafSolidExact(brep: Brep, shape: WorkplaneShape): Promise<BuildOutcome> {
+async function buildLeafSolidExact(
+  brep: Brep,
+  shape: WorkplaneShape,
+  options?: BuildOptions,
+): Promise<BuildOutcome> {
   // Modifier results (fillet/chamfer) win over the underlying primitive kind.
   if (shape.cadBrep) {
     return buildCadBrepBody(brep, shape);
@@ -413,7 +420,12 @@ async function buildLeafSolidExact(brep: Brep, shape: WorkplaneShape): Promise<B
   if (EXACT_KINDS.has(shape.kind)) {
     return buildExactSolid(brep, shape);
   }
-  if (shape.importedMesh?.brepStep) {
+  if (shape.sketchProfile) {
+    const { bakeSketchShapeSolid } = await import("@/lib/sketchBrep");
+    const solid = await bakeSketchShapeSolid(shape, options?.nested ? options.frameOrigin : undefined);
+    if (solid) return { solid, quality: "exact" };
+  }
+  if (importedMeshHasExactSource(shape.importedMesh)) {
     return buildImportedBody(brep, shape);
   }
   return {
@@ -428,6 +440,7 @@ async function buildCsgBodySolid(
   shape: WorkplaneShape,
   skipped: SkippedShape[],
   allowFaceted: boolean,
+  frameOrigin: { x: number; y: number; z: number } = { x: 0, y: 0, z: 0 },
 ): Promise<BuildOutcome> {
   // Prefer a baked exact payload on the group itself.
   if (shape.importedMesh?.brepStep) {
@@ -450,7 +463,15 @@ async function buildCsgBodySolid(
 
   for (const child of children) {
     // Child x/z/elevation are group-local; treat them as world within this frame.
-    const built = await buildShapeSolid(brep, child, skipped, { allowFaceted, nested: true });
+    const built = await buildShapeSolid(brep, child, skipped, {
+      allowFaceted,
+      nested: true,
+      frameOrigin: {
+        x: frameOrigin.x + shape.x,
+        y: frameOrigin.y + (shape.elevation ?? 0),
+        z: frameOrigin.z + shape.z,
+      },
+    });
     if ("skip" in built) {
       skipped.push(describe(child, `CSG leaf ${built.skip}`));
       leafFailures += 1;
@@ -514,6 +535,13 @@ type BuildOptions = {
   allowFaceted?: boolean;
   /** True when building a CSG leaf already expressed in parent-local coords. */
   nested?: boolean;
+  /**
+   * World origin of the parent frame. Group children store sketch planes in world
+   * coordinates and positions in parent-local coordinates. Subtract this before
+   * baking a sketch so the solid matches the local frame, then the group pose
+   * puts it back.
+   */
+  frameOrigin?: { x: number; y: number; z: number };
 };
 
 async function buildShapeSolid(
@@ -530,14 +558,14 @@ async function buildShapeSolid(
   const op = shape.csg?.op ?? inferCsgOp(shape);
 
   if (shape.groupedShapes?.length && op) {
-    const built = await buildCsgBodySolid(brep, shape, skipped, allowFaceted);
+    const built = await buildCsgBodySolid(brep, shape, skipped, allowFaceted, options?.frameOrigin);
     // When nested, buildCsgBodySolid already placed via the nested group's own pose
     // relative to its parent local frame — placeGroupLocalSolid used nested group's x/elev/z
     // which are themselves parent-local. That is correct for cloneAsGroupChild nesting.
     return built;
   }
 
-  const exact = await buildLeafSolidExact(brep, shape);
+  const exact = await buildLeafSolidExact(brep, shape, options);
   if (!("skip" in exact)) return exact;
   if (!allowFaceted) return exact;
   return buildFacetedSolid(brep, shape);

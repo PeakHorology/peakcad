@@ -71,4 +71,32 @@ describe("prepareFaceSketchReference", () => {
     );
     expect(loops).toHaveLength(0);
   });
+
+  it("sketches only the connected island under the click", () => {
+    const near: WorldTriangle[] = [
+      [pt(-10, -10), pt(10, -10), pt(10, 10)],
+      [pt(-10, -10), pt(10, 10), pt(-10, 10)],
+    ];
+    const far: WorldTriangle[] = [
+      [{ x: 40, y: 0, z: -10 }, { x: 60, y: 0, z: -10 }, { x: 60, y: 0, z: 10 }],
+      [{ x: 40, y: 0, z: -10 }, { x: 60, y: 0, z: 10 }, { x: 40, y: 0, z: 10 }],
+    ];
+    const { loops } = prepareFaceSketchReference(TOP_PLANE, [...near, ...far]);
+    expect(loops).toHaveLength(1);
+    expect(loops[0]).toHaveLength(4);
+    const xs = loops[0].map((point) => point.x);
+    expect(Math.max(...xs)).toBeLessThan(20);
+  });
+
+  it("welds slightly offset STL corners into one face", () => {
+    const a = { x: -8, y: 0, z: -8 };
+    const b = { x: 8, y: 0, z: -8 };
+    const c1 = { x: 8, y: 0, z: 8 };
+    const c2 = { x: 8.004, y: 0.004, z: 8.004 };
+    const d = { x: -8, y: 0, z: 8 };
+    const triangles: WorldTriangle[] = [[a, b, c1], [a, c2, d]];
+    const { loops } = prepareFaceSketchReference(TOP_PLANE, triangles);
+    expect(loops).toHaveLength(1);
+    expect(loops[0]).toHaveLength(4);
+  });
 });

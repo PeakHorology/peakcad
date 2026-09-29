@@ -56,6 +56,64 @@ describe("sketch solver", () => {
     expect(Math.abs(left.x + right.x)).toBeLessThan(0.2);
     expect(Math.abs(left.z - right.z)).toBeLessThan(0.2);
   });
+
+  it("snaps a skewed line exactly parallel and does not call that over-constrained", () => {
+    const doc = createEmptySketchDoc(defaultSketchPlane());
+    doc.entities = [
+      { kind: "point", id: "a0", x: 0, z: 0 },
+      { kind: "point", id: "a1", x: 20, z: 0 },
+      { kind: "point", id: "b0", x: 0, z: 6 },
+      { kind: "point", id: "b1", x: 12, z: 14 },
+      { kind: "line", id: "base", startId: "a0", endId: "a1" },
+      { kind: "line", id: "tilted", startId: "b0", endId: "b1" },
+    ];
+    const solved = solveSketchDoc(addConstraints(doc, [{ id: "par", kind: "parallel", entityIds: ["base", "tilted"] }]));
+    const b0 = solved.doc.entities.find((e) => e.id === "b0");
+    const b1 = solved.doc.entities.find((e) => e.id === "b1");
+    if (!b0 || b0.kind !== "point" || !b1 || b1.kind !== "point") throw new Error("missing endpoints");
+    expect(Math.abs(b1.z - b0.z)).toBeLessThan(1e-6);
+    expect(solved.status).not.toBe("over-constrained");
+    expect(solved.status).not.toBe("fully-defined");
+  });
+
+  it("reports unsolved when a parallel constraint cannot land, instead of over-constrained", () => {
+    const doc = createEmptySketchDoc(defaultSketchPlane());
+    doc.entities = [
+      { kind: "point", id: "a0", x: 0, z: 0, fixed: true },
+      { kind: "point", id: "a1", x: 10, z: 0, fixed: true },
+      { kind: "point", id: "b0", x: 0, z: 0, fixed: true },
+      { kind: "point", id: "b1", x: 0, z: 10, fixed: true },
+      { kind: "line", id: "flat", startId: "a0", endId: "a1" },
+      { kind: "line", id: "up", startId: "b0", endId: "b1" },
+    ];
+    const solved = solveSketchDoc(addConstraints(doc, [{ id: "par", kind: "parallel", entityIds: ["flat", "up"] }]));
+    expect(solved.status).toBe("unsolved");
+    expect(solved.conflicts).toContain("par");
+    expect(solved.status).not.toBe("fully-defined");
+  });
+
+  it("reports unsolved when fixed endpoints are not horizontal", () => {
+    const doc = createEmptySketchDoc(defaultSketchPlane());
+    doc.entities = [
+      { kind: "point", id: "a", x: 0, z: 0, fixed: true },
+      { kind: "point", id: "b", x: 10, z: 4, fixed: true },
+      { kind: "line", id: "l", startId: "a", endId: "b" },
+    ];
+    const solved = solveSketchDoc(addConstraints(doc, [{ id: "h", kind: "horizontal", entityIds: ["l"] }]));
+    expect(solved.status).toBe("unsolved");
+    expect(solved.conflicts).toContain("h");
+  });
+
+  it("reports unsolved when fixed points are not coincident", () => {
+    const doc = createEmptySketchDoc(defaultSketchPlane());
+    doc.entities = [
+      { kind: "point", id: "a", x: 0, z: 0, fixed: true },
+      { kind: "point", id: "b", x: 3, z: 0, fixed: true },
+    ];
+    const solved = solveSketchDoc(addConstraints(doc, [{ id: "co", kind: "coincident", entityIds: ["a", "b"] }]));
+    expect(solved.status).toBe("unsolved");
+    expect(solved.conflicts).toContain("co");
+  });
 });
 
 function docWithDimensionedLine(startAt: { x: number; z: number }, endAt: { x: number; z: number }, value: number) {

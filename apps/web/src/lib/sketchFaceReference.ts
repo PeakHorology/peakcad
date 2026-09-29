@@ -11,9 +11,10 @@ export type SketchFaceLoop = Array<{ x: number; z: number }>;
 
 export type WorldTriangle = [SketchVec3, SketchVec3, SketchVec3];
 
-const NORMAL_DOT = 0.96;
-const PLANE_EPS = 0.25;
 const EDGE_KEY_DECIMALS = 3;
+/** Neighbor of the clicked face: about 14° and 0.5mm, loose enough for STL float noise. */
+export const FACE_REGION_NORMAL_DOT = 0.97;
+export const FACE_REGION_PLANE_EPS = 0.5;
 
 function edgeKey(a: SketchVec3, b: SketchVec3) {
   const aKey = `${a.x.toFixed(EDGE_KEY_DECIMALS)},${a.y.toFixed(EDGE_KEY_DECIMALS)},${a.z.toFixed(EDGE_KEY_DECIMALS)}`;
@@ -83,7 +84,8 @@ export function worldTrianglesFromMeshData(
   });
 }
 
-const WELD_DECIMALS = 3;
+/** 0.01mm so STL vertices that should share a corner still weld into one face. */
+const WELD_DECIMALS = 2;
 
 /** Snap near-duplicate verts so coplanar boundary walks share edges. */
 function weldWorldTriangles(triangles: WorldTriangle[]): WorldTriangle[] {
@@ -98,19 +100,85 @@ function weldWorldTriangles(triangles: WorldTriangle[]): WorldTriangle[] {
   return triangles.map(([a, b, c]) => [weld(a), weld(b), weld(c)]);
 }
 
-function filterCoplanarTriangles(plane: SketchPlane, triangles: WorldTriangle[]): WorldTriangle[] {
-  const resolved = resolveSketchPlane(plane);
-  const normal = resolved.normal;
-  return weldWorldTriangles(triangles).filter(([a, b, c]) => {
+/**
+ * Triangles on the same plane as the hit that share edges with the triangle under the hit.
+ * A second flat island on that infinite plane is left out.
+ */
+export function connectedCoplanarTriangles(
+  triangles: WorldTriangle[],
+  origin: SketchVec3,
+  normal: SketchVec3,
+): WorldTriangle[] {
+  const unit = normalize(normal);
+  const welded = weldWorldTriangles(triangles);
+  type Info = { index: number; tri: WorldTriangle; centroid: SketchVec3 };
+  const candidates: Info[] = [];
+  welded.forEach((tri, index) => {
+    const [a, b, c] = tri;
     const triNormal = normalize(cross(sub(b, a), sub(c, a)));
-    if (Math.abs(dot(triNormal, normal)) < NORMAL_DOT) return false;
+    if (Math.abs(dot(triNormal, unit)) < FACE_REGION_NORMAL_DOT) return;
     const centroid = {
       x: (a.x + b.x + c.x) / 3,
       y: (a.y + b.y + c.y) / 3,
       z: (a.z + b.z + c.z) / 3,
     };
-    return Math.abs(dot(sub(centroid, resolved.origin), normal)) <= PLANE_EPS;
+    if (Math.abs(dot(sub(centroid, origin), unit)) > FACE_REGION_PLANE_EPS) return;
+    candidates.push({ index, tri, centroid });
   });
+  if (candidates.length === 0) return [];
+
+  const neighbors = new Map<number, number[]>();
+  const edgeToTris = new Map<string, number[]>();
+  for (const info of candidates) {
+    const [a, b, c] = info.tri;
+    ([[a, b], [b, c], [c, a]] as const).forEach(([start, end]) => {
+      const key = edgeKey(start, end);
+      const list = edgeToTris.get(key);
+      if (list) list.push(info.index);
+      else edgeToTris.set(key, [info.index]);
+    });
+  }
+  const link = (from: number, to: number) => {
+    const list = neighbors.get(from);
+    if (list) list.push(to);
+    else neighbors.set(from, [to]);
+  };
+  for (const list of edgeToTris.values()) {
+    if (list.length < 2) continue;
+    for (let i = 0; i < list.length; i += 1) {
+      for (let j = i + 1; j < list.length; j += 1) {
+        link(list[i], list[j]);
+        link(list[j], list[i]);
+      }
+    }
+  }
+
+  let seed = candidates[0];
+  let best = Infinity;
+  for (const info of candidates) {
+    const distance = length(sub(info.centroid, origin));
+    if (distance < best) {
+      best = distance;
+      seed = info;
+    }
+  }
+
+  const byIndex = new Map(candidates.map((info) => [info.index, info]));
+  const seen = new Set<number>();
+  const stack = [seed.index];
+  const region: WorldTriangle[] = [];
+  while (stack.length > 0) {
+    const id = stack.pop();
+    if (id === undefined || seen.has(id)) continue;
+    seen.add(id);
+    const info = byIndex.get(id);
+    if (!info) continue;
+    region.push(info.tri);
+    for (const next of neighbors.get(id) ?? []) {
+      if (!seen.has(next)) stack.push(next);
+    }
+  }
+  return region;
 }
 
 function boundaryLoopsFromTriangles(triangles: WorldTriangle[]): SketchVec3[][] {
@@ -192,7 +260,7 @@ export function prepareFaceSketchReference(
   triangles: WorldTriangle[],
 ): { plane: SketchPlane; loops: SketchFaceLoop[] } {
   const resolved = resolveSketchPlane(plane);
-  const coplanar = filterCoplanarTriangles(resolved, triangles);
+  const coplanar = connectedCoplanarTriangles(triangles, resolved.origin, resolved.normal);
   if (coplanar.length === 0) {
     return { plane: cloneSketchPlane(resolved), loops: [] };
   }

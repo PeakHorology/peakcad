@@ -193,11 +193,11 @@ export function matchRecipeEdgeIds(
         matched.push(best.id);
       }
     }
-    if (matched.length > 0) {
+    // Every stored edge has to land. A partial hit used to fillet the survivors and
+    // drop the rest with no signal, so a remesh looked successful while an edge was lost.
+    if (matched.length === fingerprints.length) {
       return matched;
     }
-    // Fingerprints exist but nothing matched: the topology really changed. Report that
-    // instead of falling through to "sharpest N", which fillets arbitrary edges.
     return [];
   }
 

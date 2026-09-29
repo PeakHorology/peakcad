@@ -110,4 +110,13 @@ describe("importTriangleSoup seating", () => {
     expect(size.minY).toBeCloseTo(0, 4);
     expect(size.height).toBeCloseTo(3, 3);
   });
+
+  it("keeps file orientation and still sits the mesh on the floor", () => {
+    const onSide = rotatePositions(boxPositions(16, 3, 9), new THREE.Vector3(1, 0, 0), 90);
+    const kept = importTriangleSoup("plate.stl", onSide, undefined, "stl", "keep-orientation");
+    const laid = importTriangleSoup("plate.stl", onSide, undefined, "stl", "lay-flat");
+    expect(kept.shape.height).toBeGreaterThan(laid.shape.height + 1);
+    const size = bounds(kept.shape.importedMesh!.positions);
+    expect(size.minY).toBeCloseTo(0, 4);
+  });
 });

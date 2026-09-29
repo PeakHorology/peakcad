@@ -44,8 +44,8 @@ type ToolSection = {
   tools: ToolDef[];
 };
 
-const TOOL_SLOT_PX = 42;
-const MORE_SLOT_PX = 42;
+const TOOL_SLOT_PX = 38;
+const MORE_SLOT_PX = 38;
 
 /** Live hotkey bindings so toolbar tooltips reflect any user remaps. */
 function useHotkeyBindings(): HotkeyBindings {

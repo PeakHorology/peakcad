@@ -75,6 +75,23 @@ describe("edgeTreatmentRematch", () => {
     expect(matchRecipeEdgeIds(recipe, [farParallel, edge(9, -50, 10, 20, 50, 10, 20)], 25)).toEqual([9]);
   });
 
+  it("does not fillet the survivors when one stored edge is gone", () => {
+    const original = [
+      edge(0, 0, 10, 0, 10, 10, 0, 90),
+      edge(1, 10, 0, 0, 10, 10, 0, 90),
+    ];
+    const fingerprints = fingerprintsForEdgeIds(original, [0, 1]);
+    const survivorOnly = [
+      edge(7, 0.1, 10, 0, 10, 10.1, 0, 90),
+      edge(8, 0, 0, 40, 10, 0, 40, 90),
+    ];
+    expect(matchRecipeEdgeIds(
+      { edgeCount: 2, edgeFingerprints: fingerprints, edgeIds: [0, 1] },
+      survivorOnly,
+      25,
+    )).toEqual([]);
+  });
+
   it("matches recipes by geometry after id churn", () => {
     const original = [
       edge(0, 0, 10, 0, 10, 10, 0, 90),

@@ -1,8 +1,14 @@
-import type { SketchPlane, SketchProfile, WorkplaneShape } from "@/types/sketchforge";
+import type { SketchCylinderSurface, SketchPlane, SketchProfile, WorkplaneShape } from "@/types/sketchforge";
 import { loadBrepWithOcct, type Brep, type BrepSolid } from "@/lib/brepKernel";
 import { faceHoleOvershootMm } from "@/lib/csgTree";
-import { resolveSketchPlane, sketchPlaneVAxis } from "@/lib/sketchPlane";
-import { isCylinderSketchPlane } from "@/lib/sketchCylinder";
+import { isDefaultSketchPlane, isFaceHostedSketch, resolveSketchPlane, sketchPlaneVAxis } from "@/lib/sketchPlane";
+import { orderedSketchPaths, type OrderedSketchPath } from "@/lib/sketch/profiles";
+import {
+  barrelHoleCutDepthMm,
+  cylinderOutwardNormalAtUV,
+  cylinderUVToWorld,
+  isCylinderSketchPlane,
+} from "@/lib/sketchCylinder";
 import { shapeHasExactBrepSource } from "@/lib/stepQuality";
 
 export type SketchBrepBakeResult = {
@@ -61,6 +67,111 @@ async function exportSolidStep(brep: Brep, solid: BrepSolid): Promise<SketchBrep
   return { brepStep, solid };
 }
 
+function circleFromUvPoints(points: { x: number; z: number }[]) {
+  if (points.length < 8) return null;
+  const cx = points.reduce((sum, point) => sum + point.x, 0) / points.length;
+  const cz = points.reduce((sum, point) => sum + point.z, 0) / points.length;
+  const radii = points.map((point) => Math.hypot(point.x - cx, point.z - cz));
+  const radius = radii.reduce((sum, value) => sum + value, 0) / radii.length;
+  if (radius < 0.05) return null;
+  const spread = Math.max(...radii) - Math.min(...radii);
+  if (spread > Math.max(0.05, radius * 0.02)) return null;
+  return { cx, cz, radius };
+}
+
+function subsamplePoints<T>(points: T[], max: number) {
+  if (points.length <= max) return points;
+  const out: T[] = [];
+  for (let i = 0; i < max; i += 1) out.push(points[Math.floor((i * points.length) / max)]);
+  return out;
+}
+
+function closedWire(brep: Brep, points: { x: number; y: number; z: number }[]) {
+  const edges = [];
+  for (let i = 0; i < points.length; i += 1) {
+    const a = points[i];
+    const b = points[(i + 1) % points.length];
+    if (Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) < 1e-6) continue;
+    edges.push(brep.line([a.x, a.y, a.z], [b.x, b.y, b.z]));
+  }
+  if (edges.length < 3) return null;
+  const loop = brep.wireLoop(edges);
+  return loop.ok ? loop.value : null;
+}
+
+function radialSketchSolid(
+  brep: Brep,
+  surface: SketchCylinderSurface,
+  points: { x: number; z: number }[],
+  depth: number,
+  cutIntoFace: boolean,
+): BrepSolid | null {
+  const circle = circleFromUvPoints(points);
+  if (circle) {
+    const normal = cylinderOutwardNormalAtUV(surface, circle.cx);
+    const axis = surface.axisDir;
+    const onAxis = {
+      x: surface.axisOrigin.x - axis.x * circle.cz,
+      y: surface.axisOrigin.y - axis.y * circle.cz,
+      z: surface.axisOrigin.z - axis.z * circle.cz,
+    };
+    const length = cutIntoFace ? Math.max(depth, barrelHoleCutDepthMm(surface)) : depth;
+    const at = cutIntoFace
+      ? onAxis
+      : {
+        x: onAxis.x + normal.x * (surface.radius + length / 2),
+        y: onAxis.y + normal.y * (surface.radius + length / 2),
+        z: onAxis.z + normal.z * (surface.radius + length / 2),
+      };
+    return brep.cylinder(circle.radius, length, {
+      axis: [normal.x, normal.y, normal.z],
+      centered: true,
+      at: [at.x, at.y, at.z],
+    }) as unknown as BrepSolid;
+  }
+
+  const samples = subsamplePoints(points, 24);
+  const overshoot = faceHoleOvershootMm(surface.radius * 2);
+  const outerR = cutIntoFace ? surface.radius + overshoot : surface.radius + depth;
+  const innerR = cutIntoFace ? -(surface.radius + overshoot) : surface.radius;
+  const outer = samples.map((point) => cylinderUVToWorld(surface, point.x, point.z, outerR));
+  const inner = samples.map((point) => cylinderUVToWorld(surface, point.x, point.z, innerR));
+  const innerWire = closedWire(brep, inner);
+  const outerWire = closedWire(brep, outer);
+  if (!innerWire || !outerWire) return null;
+  const lofted = brep.loft([innerWire, outerWire], { ruled: true });
+  if (!lofted.ok) return null;
+  return lofted.value as unknown as BrepSolid;
+}
+
+async function bakeCylinderSketchExtrusion(
+  brep: Brep,
+  surface: SketchCylinderSurface,
+  paths: ClosedPath[],
+  depth: number,
+  cutIntoFace: boolean,
+): Promise<SketchBrepBakeResult | null> {
+  const sorted = [...paths].sort((a, b) => pathArea(b) - pathArea(a));
+  const solids: BrepSolid[] = [];
+  for (const path of sorted) {
+    const solid = radialSketchSolid(brep, surface, path.points, depth, cutIntoFace);
+    if (!solid) return null;
+    solids.push(solid);
+  }
+  if (solids.length === 0) return null;
+  let acc = solids[0];
+  for (let i = 1; i < solids.length; i += 1) {
+    let nest = 0;
+    for (let j = 0; j < i; j += 1) {
+      if (pathContains(sorted[j], sorted[i])) nest += 1;
+    }
+    const next = nest % 2 === 1 ? brep.cut(acc as never, solids[i] as never) : brep.fuse(acc as never, solids[i] as never);
+    if (!next.ok) return null;
+    acc = next.value as unknown as BrepSolid;
+  }
+  return exportSolidStep(brep, acc);
+}
+
 /**
  * Build an OCCT solid from closed sketch UV loops extruded along the plane normal.
  * Face holes pull along the normal so the cutter spans past both skins (matches mesh bake).
@@ -78,11 +189,15 @@ export async function bakeSketchExtrusionBrep(
   if (paths.length === 0) return null;
   const safeHeight = Math.max(0.05, height);
   const plane = resolveSketchPlane(options?.plane ?? profile.sketchPlane);
+  const brep = await loadBrepWithOcct();
   if (isCylinderSketchPlane(plane)) {
-    return null;
+    try {
+      return await bakeCylinderSketchExtrusion(brep, plane.surface, paths, safeHeight, Boolean(options?.cutIntoFace));
+    } catch {
+      return null;
+    }
   }
 
-  const brep = await loadBrepWithOcct();
   try {
     const drawing = await drawingFromClosedPaths(brep, paths);
     if (!drawing) return null;
@@ -141,6 +256,81 @@ export async function bakeSketchRevolveBrep(
   } catch {
     return null;
   }
+}
+
+export function densifyClosedPathUv(path: OrderedSketchPath, curveSegments = 20): Array<{ x: number; z: number }> {
+  const samples: Array<{ x: number; z: number }> = [];
+  path.steps.forEach(({ segment, from, to }) => {
+    const forward = segment.startId === from.id;
+    const control1 = forward ? from.handleOut : from.handleIn;
+    const control2 = forward ? to.handleIn : to.handleOut;
+    if (segment.kind !== "line" && control1 && control2) {
+      const count = Math.max(4, curveSegments);
+      for (let i = 0; i < count; i += 1) {
+        const t = i / count;
+        const mt = 1 - t;
+        samples.push({
+          x: mt * mt * mt * from.x + 3 * mt * mt * t * control1.x + 3 * mt * t * t * control2.x + t * t * t * to.x,
+          z: mt * mt * mt * from.z + 3 * mt * mt * t * control1.z + 3 * mt * t * t * control2.z + t * t * t * to.z,
+        });
+      }
+    } else {
+      samples.push({ x: from.x, z: from.z });
+    }
+  });
+  return samples;
+}
+
+/**
+ * Exact solid for a sketch feature, built from the profile at export time.
+ * The editor keeps the mesh; this is the STEP bake.
+ */
+export async function bakeSketchShapeSolid(
+  shape: WorkplaneShape,
+  frameOrigin?: { x: number; y: number; z: number },
+): Promise<BrepSolid | null> {
+  if (!shape.sketchProfile) return null;
+  const resolved = resolveSketchPlane(shape.sketchPlane ?? shape.sketchProfile.sketchPlane);
+  const plane = frameOrigin
+    ? {
+      ...resolved,
+      origin: {
+        x: resolved.origin.x - frameOrigin.x,
+        y: resolved.origin.y - frameOrigin.y,
+        z: resolved.origin.z - frameOrigin.z,
+      },
+      surface: resolved.surface?.kind === "cylinder"
+        ? {
+          ...resolved.surface,
+          axisOrigin: {
+            x: resolved.surface.axisOrigin.x - frameOrigin.x,
+            y: resolved.surface.axisOrigin.y - frameOrigin.y,
+            z: resolved.surface.axisOrigin.z - frameOrigin.z,
+          },
+        }
+        : resolved.surface,
+    }
+    : resolved;
+  if (
+    isDefaultSketchPlane(plane)
+    && (shape.kind === "box" || shape.kind === "cylinder" || shape.kind === "sphere" || shape.kind === "cone")
+  ) {
+    return null;
+  }
+  const closed = orderedSketchPaths(shape.sketchProfile).filter((path) => path.closed);
+  if (closed.length === 0) return null;
+  const closedPaths = closed.map((path) => ({ points: densifyClosedPathUv(path) }));
+  if (shape.sketchFinish === "revolve" && shape.sketchRevolveAxis) {
+    const baked = await bakeSketchRevolveBrep(shape.sketchProfile, shape.sketchRevolveAxis, { plane, closedPaths });
+    return baked?.solid ?? null;
+  }
+  const faceHosted = isFaceHostedSketch(plane, shape.sketchProfile.faceReferenceLoops);
+  const baked = await bakeSketchExtrusionBrep(shape.sketchProfile, shape.height, {
+    plane,
+    cutIntoFace: Boolean(shape.hole && faceHosted),
+    closedPaths,
+  });
+  return baked?.solid ?? null;
 }
 
 /** Attach baked STEP text onto a mesh shape for exact STEP round-trip. */

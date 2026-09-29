@@ -19,6 +19,7 @@ export type PeakcadFileApi = {
   reveal?: (filePath: string) => Promise<void>;
   onOpenPath?: (listener: (filePath: string) => void) => () => void;
   onMenu?: (listener: (action: PeakcadMenuAction) => void) => () => void;
+  onSaveBeforeClose?: (handler: () => Promise<boolean>) => () => void;
 };
 
 export type PeakcadMenuAction = "new" | "open" | "save" | "save-as";
@@ -71,15 +72,23 @@ export async function readPeakcadPath(filePath: string): Promise<OpenedPeakcadFi
 }
 
 export async function writePeakcadPath(filePath: string, document: PeakcadDocument) {
+  await writePeakcadText(filePath, serializePeakcadDocument(document));
+}
+
+/** Write already-serialized `.peakcad` text (see serializePeakcadDocument). */
+export async function writePeakcadText(filePath: string, text: string) {
   const desktop = fileApi();
   if (!desktop?.write) {
     throw new Error("Saving to a file path is only available in the PeakCAD desktop app.");
   }
-  await desktop.write({ path: filePath, text: serializePeakcadDocument(document) });
+  await desktop.write({ path: filePath, text });
 }
 
 export async function savePeakcadAs(document: PeakcadDocument, suggestedName: string): Promise<string | null> {
-  const text = serializePeakcadDocument(document);
+  return savePeakcadTextAs(serializePeakcadDocument(document), suggestedName);
+}
+
+export async function savePeakcadTextAs(text: string, suggestedName: string): Promise<string | null> {
   const defaultName = peakcadFilename(suggestedName);
   const desktop = fileApi();
   if (desktop?.saveAs) {
@@ -120,4 +129,9 @@ export function subscribePeakcadOpenPath(listener: (filePath: string) => void) {
 
 export function subscribePeakcadMenu(listener: (action: PeakcadMenuAction) => void) {
   return fileApi()?.onMenu?.(listener);
+}
+
+/** Desktop window close chose Save: the window closes only if `handler` resolves true. */
+export function subscribePeakcadSaveBeforeClose(handler: () => Promise<boolean>) {
+  return fileApi()?.onSaveBeforeClose?.(handler);
 }

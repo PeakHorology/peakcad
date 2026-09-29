@@ -1,6 +1,6 @@
 "use client";
 
-import { BookOpen, FolderDown, Grid3X3, Keyboard, Palette, Ruler, X } from "lucide-react";
+import { BookOpen, FolderDown, Grid3X3, Info, Keyboard, Palette, Ruler, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { PeakTipButton, PeakTipLabel } from "@/components/workplane/ToolNameTooltip";
 import {
@@ -27,8 +27,18 @@ import { DEFAULT_WORKPLANE_WORKSPACE } from "@/lib/workplaneSettings";
 import type { DisplayQuality, GridSize, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
 
 type WorkspaceSettings = WorkplaneWorkspaceSettings;
-type WorkspaceSettingsSection = "appearance" | "measurement" | "workplane" | "files" | "tools" | "hotkeys";
+type WorkspaceSettingsSection = "appearance" | "measurement" | "workplane" | "files" | "tools" | "hotkeys" | "about";
 type WorkspaceSettingsContext = "project" | "app";
+type LegalDocumentId = "license" | "notices" | "offer";
+
+const PEAKCAD_VERSION = process.env.NEXT_PUBLIC_PEAKCAD_VERSION ?? "";
+
+// Staged into public/legal by scripts/stage-legal-notices.mjs; relative so it resolves under the desktop shell's static server too.
+const LEGAL_DOCUMENTS: { id: LegalDocumentId; label: string; path: string }[] = [
+  { id: "license", label: "View GPL-3.0 license", path: "legal/LICENSE.txt" },
+  { id: "notices", label: "Third-party notices", path: "legal/THIRD-PARTY-NOTICES.txt" },
+  { id: "offer", label: "Source code offer", path: "legal/SOURCE-OFFER.txt" },
+];
 
 function loadDownloadFolder() {
   if (typeof window === "undefined") return "";
@@ -125,6 +135,8 @@ export function WorkspaceSettingsModal({
   const [hotkeys, setHotkeys] = useState<HotkeyBindings>(() => loadHotkeyBindings());
   const [recordingAction, setRecordingAction] = useState<HotkeyActionId | null>(null);
   const [hotkeyNotice, setHotkeyNotice] = useState<string | null>(null);
+  const [legalDocument, setLegalDocument] = useState<LegalDocumentId | null>(null);
+  const [legalText, setLegalText] = useState<string | null>(null);
   const [dimensionDrafts, setDimensionDrafts] = useState(() => ({
     width: workspace.width.toFixed(workspace.accuracy),
     depth: workspace.depth.toFixed(workspace.accuracy),
@@ -205,6 +217,30 @@ export function WorkspaceSettingsModal({
     const timer = window.setTimeout(() => setHotkeyNotice(null), 2200);
     return () => window.clearTimeout(timer);
   }, [hotkeyNotice]);
+  useEffect(() => {
+    const source = LEGAL_DOCUMENTS.find((entry) => entry.id === legalDocument);
+    setLegalText(null);
+    if (!source) return;
+    let cancelled = false;
+    fetch(source.path)
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.text();
+      })
+      .then(
+        (text) => {
+          if (!cancelled) setLegalText(text);
+        },
+        () => {
+          if (!cancelled) {
+            setLegalText("This file could not be loaded. The same license files ship in the PeakCAD install folder (LICENSE.txt, THIRD-PARTY-NOTICES.txt, SOURCE-OFFER.txt) and at https://www.gnu.org/licenses/gpl-3.0.txt.");
+          }
+        },
+      );
+    return () => {
+      cancelled = true;
+    };
+  }, [legalDocument]);
   const patchWorkspace = (patch: Partial<WorkspaceSettings>) => {
     setDefaultSaved(false);
     const next = { ...workspace, ...patch };
@@ -267,6 +303,10 @@ export function WorkspaceSettingsModal({
             <button className={activeSection === "hotkeys" ? "active" : ""} aria-current={activeSection === "hotkeys" ? "page" : undefined} onClick={() => setActiveSection("hotkeys")}>
               <Keyboard size={18} />
               <span>Hotkeys</span>
+            </button>
+            <button className={activeSection === "about" ? "active" : ""} aria-current={activeSection === "about" ? "page" : undefined} onClick={() => setActiveSection("about")}>
+              <Info size={18} />
+              <span>About</span>
             </button>
           </nav>
 
@@ -608,16 +648,63 @@ export function WorkspaceSettingsModal({
                   </div>
                 </>
               ) : null}
+
+              {activeSection === "about" ? (
+                <>
+                  <div className="workspace-section-heading">
+                    <strong>About PeakCAD</strong>
+                    <span>{PEAKCAD_VERSION ? `Version ${PEAKCAD_VERSION}` : "PeakCAD"} · GPL-3.0-or-later</span>
+                  </div>
+                  <div className="workspace-about-notice">
+                    <p className="workspace-about-copyright">Copyright © PeakHorologyLLC</p>
+                    <p>
+                      PeakCAD is free software: you can redistribute it and/or modify it under the terms of the GNU General
+                      Public License as published by the Free Software Foundation, either version 3 of the License, or (at
+                      your option) any later version.
+                    </p>
+                    <p>
+                      PeakCAD is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY; without even the
+                      implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+                      License for more details.
+                    </p>
+                    <p>
+                      PeakCAD includes OpenCascade Technology (LGPL-2.1 with the Open CASCADE exception), brepjs and
+                      manifold-3d (Apache-2.0), three.js, React, Next.js, Electron, and other components under their own
+                      licenses. See the third-party notices for the full list and license texts.
+                    </p>
+                  </div>
+                  <div className="workspace-about-actions">
+                    {LEGAL_DOCUMENTS.map((entry) => (
+                      <button
+                        key={entry.id}
+                        type="button"
+                        className={`workspace-hotkey-reset${legalDocument === entry.id ? " active" : ""}`}
+                        aria-pressed={legalDocument === entry.id}
+                        onClick={() => setLegalDocument((current) => (current === entry.id ? null : entry.id))}
+                      >
+                        {entry.label}
+                      </button>
+                    ))}
+                  </div>
+                  {legalDocument ? (
+                    <pre className="workspace-about-document" tabIndex={0} aria-label={LEGAL_DOCUMENTS.find((entry) => entry.id === legalDocument)?.label}>
+                      {legalText ?? "Loading…"}
+                    </pre>
+                  ) : null}
+                </>
+              ) : null}
             </div>
 
             <div className="workspace-modal-footer">
               {activeSection === "hotkeys" ? (
                 <span>Hotkeys save as you change them. L is Align in geometry and Line in a sketch; D is Drop vs Dimension.</span>
-              ) : activeSection === "tools" || activeSection === "files" ? (
+              ) : activeSection === "tools" || activeSection === "files" || activeSection === "about" ? (
                 <span>
                   {activeSection === "tools"
                     ? "Tool help is a reference only — it does not change project defaults."
-                    : "Download folder is remembered on this computer."}
+                    : activeSection === "about"
+                      ? "The desktop app also ships LICENSE.txt, THIRD-PARTY-NOTICES.txt, and SOURCE-OFFER.txt in its install folder, and under Help in the menu bar."
+                      : "Download folder is remembered on this computer."}
                 </span>
               ) : (
                 <>

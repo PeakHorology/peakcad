@@ -1,6 +1,18 @@
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import type { NextConfig } from "next";
 
 const isStaticExport = process.env.STATIC_EXPORT === "true";
+
+// `next dev/build apps/web` runs from the repo root, but tolerate being run from apps/web too.
+function peakcadVersion() {
+  for (const candidate of [path.resolve("package.json"), path.resolve("..", "..", "package.json")]) {
+    if (!existsSync(candidate)) continue;
+    const pkg = JSON.parse(readFileSync(candidate, "utf8")) as { name?: string; version?: string };
+    if (pkg.name === "peakcad" && pkg.version) return pkg.version;
+  }
+  return "";
+}
 const extraAllowedDevOrigins = (process.env.SKETCHFORGE_ALLOWED_DEV_ORIGINS ?? "")
   .split(",")
   .map((origin) => origin.trim())
@@ -15,6 +27,7 @@ const nextConfig: NextConfig = {
   allowedDevOrigins: ["localhost", "127.0.0.1", ...extraAllowedDevOrigins],
   env: {
     NEXT_PUBLIC_STATIC_EXPORT: isStaticExport ? "true" : "false",
+    NEXT_PUBLIC_PEAKCAD_VERSION: peakcadVersion(),
   },
   images: {
     unoptimized: true

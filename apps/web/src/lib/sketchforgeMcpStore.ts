@@ -16,6 +16,7 @@ type SketchForgeMcpStore = {
   editors: Map<string, SketchForgeMcpEditorSummary>;
   queues: Map<string, SketchForgeMcpCommand[]>;
   pending: Map<string, PendingCommand>;
+  clientSeenAt: number;
 };
 
 declare global {
@@ -28,7 +29,9 @@ function store() {
     editors: new Map<string, SketchForgeMcpEditorSummary>(),
     queues: new Map<string, SketchForgeMcpCommand[]>(),
     pending: new Map<string, PendingCommand>(),
+    clientSeenAt: 0,
   };
+  globalThis.__sketchforgeMcpStore.clientSeenAt ??= 0;
   return globalThis.__sketchforgeMcpStore;
 }
 
@@ -66,6 +69,20 @@ export function registerSketchForgeMcpEditor(editor: Omit<SketchForgeMcpEditorSu
   const state = store();
   state.editors.set(editor.editorId, { ...editor, lastSeen: current });
   state.queues.set(editor.editorId, state.queues.get(editor.editorId) ?? []);
+}
+
+const CLIENT_LISTEN_MS = 20_000;
+
+export function noteSketchForgeMcpClient() {
+  store().clientSeenAt = Date.now();
+}
+
+export function sketchForgeMcpShouldListen(editorId: string) {
+  const state = store();
+  const recent = Date.now() - (state.clientSeenAt ?? 0) < CLIENT_LISTEN_MS;
+  const queued = (state.queues.get(editorId)?.length ?? 0) > 0;
+  const waiting = [...state.pending.values()].some((entry) => entry.editorId === editorId);
+  return recent || queued || waiting;
 }
 
 export function listSketchForgeMcpEditors() {

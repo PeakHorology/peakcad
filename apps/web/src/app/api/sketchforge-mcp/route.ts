@@ -4,8 +4,10 @@ import {
   completeSketchForgeMcpCommand,
   dispatchSketchForgeMcpCommand,
   listSketchForgeMcpEditors,
+  noteSketchForgeMcpClient,
   pollSketchForgeMcpCommand,
   registerSketchForgeMcpEditor,
+  sketchForgeMcpShouldListen,
 } from "@/lib/sketchforgeMcpStore";
 
 export const revalidate = false;
@@ -51,6 +53,7 @@ function isObject(value: unknown): value is Record<string, unknown> {
 export async function GET(request: Request) {
   const blocked = localOnly(request);
   if (blocked) return blocked;
+  noteSketchForgeMcpClient();
   return NextResponse.json({ editors: listSketchForgeMcpEditors() });
 }
 
@@ -74,7 +77,12 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Invalid editor heartbeat." }, { status: 400 });
     }
     registerSketchForgeMcpEditor(body.editor);
-    return NextResponse.json({ ok: true, editors: listSketchForgeMcpEditors() });
+    const editorId = typeof body.editor.editorId === "string" ? body.editor.editorId : "";
+    return NextResponse.json({
+      ok: true,
+      editors: listSketchForgeMcpEditors(),
+      listen: editorId ? sketchForgeMcpShouldListen(editorId) : false,
+    });
   }
 
   if (body.type === "poll") {
@@ -95,6 +103,7 @@ export async function POST(request: Request) {
     if (typeof body.action !== "string") {
       return NextResponse.json({ error: "Invalid command action." }, { status: 400 });
     }
+    noteSketchForgeMcpClient();
     const result = await dispatchSketchForgeMcpCommand({
       editorId: typeof body.editorId === "string" ? body.editorId : undefined,
       editorNumber: typeof body.editorNumber === "number" ? body.editorNumber : undefined,

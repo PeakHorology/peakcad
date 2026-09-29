@@ -45,7 +45,11 @@ export type SketchTool =
   | "constrain-parallel"
   | "constrain-perp"
   | "constrain-tangent"
-  | "constrain-symmetry";
+  | "constrain-symmetry"
+  | "constrain-coincident"
+  | "constrain-midpoint"
+  | "constrain-fix"
+  | "constrain-concentric";
 export type SketchSelection =
   | { kind: "point"; id: string }
   | { kind: "segment"; id: string }
@@ -90,7 +94,7 @@ type SketchWorkspaceProps = {
   onOffsetSegment: (segmentId: string, toward: { x: number; z: number }) => void;
   polygonSides?: number;
   onPointPress: (id: string) => void;
-  onSelectSegment: (id: string) => void;
+  onSelectSegment: (id: string, at?: { x: number; z: number }) => void;
   onSelectMany: (pointIds: string[], segmentIds: string[], imageIds: string[]) => void;
   onSelectImage: (id: string) => void;
   onUpdateImage: (id: string, patch: Partial<SketchImage>, message?: string) => void;
@@ -591,13 +595,19 @@ function importedMeshFootprint(shape: WorkplaneShape): SketchReferenceFootprint 
   const points: Array<{ x: number; z: number }> = [];
   const triangles: number[][] = [];
   const allProjected: Array<{ x: number; z: number }> = [];
+  const indices = shape.importedMesh.indices?.length ? shape.importedMesh.indices : null;
+  const triangleCount = indices ? Math.floor(indices.length / 3) : Math.floor(positions.length / 9);
+  const corner = (triangle: number, slot: number) => (indices ? indices[triangle * 3 + slot] : triangle * 3 + slot) * 3;
 
-  for (let index = 0; index + 8 < positions.length; index += 9) {
-    const ys = [positions[index + 1], positions[index + 4], positions[index + 7]];
+  for (let triangle = 0; triangle < triangleCount; triangle += 1) {
+    const a = corner(triangle, 0);
+    const b = corner(triangle, 1);
+    const c = corner(triangle, 2);
+    const ys = [positions[a + 1], positions[b + 1], positions[c + 1]];
     const projected = [
-      sketchReferencePoint(shape, positions[index], positions[index + 2]),
-      sketchReferencePoint(shape, positions[index + 3], positions[index + 5]),
-      sketchReferencePoint(shape, positions[index + 6], positions[index + 8]),
+      sketchReferencePoint(shape, positions[a], positions[a + 2]),
+      sketchReferencePoint(shape, positions[b], positions[b + 2]),
+      sketchReferencePoint(shape, positions[c], positions[c + 2]),
     ];
     allProjected.push(...projected);
     if (!ys.every((value) => value <= minY + bottomTolerance) || triangleArea2d(projected[0], projected[1], projected[2]) <= tolerance) {
@@ -1447,7 +1457,7 @@ export function SketchWorkspace({
                   else if (event.button === 0 && tool === "offset" && point) {
                     svgRef.current?.setPointerCapture(event.pointerId);
                     setPointerAction({ kind: "offset", pointerId: event.pointerId, segmentId: segment.id, current: point });
-                  } else if (event.button === 0) onSelectSegment(segment.id);
+                  } else if (event.button === 0) onSelectSegment(segment.id, point ?? undefined);
                 }}
               />
             ))}

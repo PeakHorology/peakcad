@@ -2,7 +2,7 @@
 
 import { ArrowLeft, EllipsisVertical, FolderOpen, FolderPlus, Grid3X3, List, Pencil, Plus, Search, Settings, SlidersHorizontal, Star, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent } from "react";
-import { SketchForgeEditor } from "@/components/SketchForgeEditor";
+import { SketchForgeEditor, type EditorLeaveGuard } from "@/components/SketchForgeEditor";
 import { IntroCoach } from "@/components/workplane/IntroCoach";
 import { hydrateEditorHistoryState, projectShapesFingerprint, type EditorHistoryEntry } from "@/lib/editorHistory";
 import { DOWNLOAD_FOLDER_STORAGE_KEY } from "@/lib/downloadFile";
@@ -31,19 +31,30 @@ import {
   markIntroCoachDismissed,
   markIntroSeeded,
 } from "@/lib/introProject";
-import { buildPeakcadDocument, peakcadBasename, peakcadFilename, peakcadNamesMatch, type PeakcadDocument } from "@/lib/peakcadDocument";
+import {
+  buildPeakcadDocument,
+  peakcadBasename,
+  peakcadFilename,
+  peakcadNamesMatch,
+  serializePeakcadDocument,
+  type PeakcadDocument,
+  type PeakcadProjectMeta,
+} from "@/lib/peakcadDocument";
 import {
   hasDesktopProjectFiles,
   openPeakcadFile,
   readPeakcadPath,
   resolveDesktopPeakcadByName,
   revealPeakcadFile,
-  savePeakcadAs,
+  savePeakcadTextAs,
   subscribePeakcadMenu,
   subscribePeakcadOpenPath,
+  subscribePeakcadSaveBeforeClose,
   writeNewDesktopPeakcad,
-  writePeakcadPath,
+  writePeakcadText,
 } from "@/lib/peakcadFile";
+import { openProjectStoreDb, PROJECT_THUMBNAILS_STORE_NAME } from "@/lib/projectStoreOps";
+import { deleteStoredProject, loadStoredProject, saveStoredProject, serializeStoredProject } from "@/lib/projectStoreClient";
 
 type AppView = "dashboard" | "editor";
 type ViewMode = "grid" | "list";
@@ -102,10 +113,6 @@ const PROJECT_FOLDER_MAP_KEY = "sketchForge.projectFolderMap";
 const DASHBOARD_ORDER_KEY = "sketchForge.dashboardOrder";
 const PROJECT_DRAG_MIME = "application/x-peakcad-project-id";
 const ARRANGE_DRAG_MIME = "application/x-peakcad-arrange";
-const PROJECT_SHAPES_DB_NAME = "sketchForge.projectShapes";
-const PROJECT_SHAPES_STORE_NAME = "projectShapes";
-const PROJECT_THUMBNAILS_STORE_NAME = "projectThumbnails";
-const PROJECT_SHAPES_DB_VERSION = 2;
 const PROJECT_THUMBNAIL_MAX_SIZE = hardwareProfile().thumbnailSize;
 const PROJECT_ACCENTS: DashboardProject["accent"][] = ["cyan", "green", "gold", "red"];
 const STATIC_EXPORT_BUILD = process.env.NEXT_PUBLIC_STATIC_EXPORT === "true";
@@ -201,87 +208,32 @@ function projectShapeCacheEntry(
 }
 
 function openProjectShapesDb() {
-  return new Promise<IDBDatabase>((resolve, reject) => {
-    if (typeof window === "undefined" || !window.indexedDB) {
-      reject(new Error("Project shape storage is unavailable"));
-      return;
-    }
-
-    const request = window.indexedDB.open(PROJECT_SHAPES_DB_NAME, PROJECT_SHAPES_DB_VERSION);
-    request.onupgradeneeded = () => {
-      const database = request.result;
-      if (!database.objectStoreNames.contains(PROJECT_SHAPES_STORE_NAME)) {
-        database.createObjectStore(PROJECT_SHAPES_STORE_NAME, { keyPath: "id" });
-      }
-      if (!database.objectStoreNames.contains(PROJECT_THUMBNAILS_STORE_NAME)) {
-        database.createObjectStore(PROJECT_THUMBNAILS_STORE_NAME, { keyPath: "id" });
-      }
-    };
-    request.onerror = () => reject(request.error ?? new Error("Could not open project shape storage"));
-    request.onsuccess = () => resolve(request.result);
-  });
+  return openProjectStoreDb(typeof window === "undefined" ? undefined : window.indexedDB);
 }
 
-async function loadProjectShapes(projectId: string) {
-  const database = await openProjectShapesDb();
-  return new Promise<ProjectShapeRecord | null>((resolve, reject) => {
-    const transaction = database.transaction(PROJECT_SHAPES_STORE_NAME, "readonly");
-    const request = transaction.objectStore(PROJECT_SHAPES_STORE_NAME).get(projectId);
-    request.onerror = () => reject(request.error ?? new Error("Could not load project shapes"));
-    request.onsuccess = () => resolve((request.result as ProjectShapeRecord | undefined) ?? null);
-    transaction.oncomplete = () => database.close();
-    transaction.onerror = () => {
-      database.close();
-      reject(transaction.error ?? new Error("Could not load project shapes"));
-    };
-  });
+// Shape records (and their deduplicated mesh blobs) are read and written by the project-store worker.
+async function loadProjectShapes(projectId: string): Promise<ProjectShapeRecord | null> {
+  const snapshot = await loadStoredProject(projectId);
+  if (!snapshot) return null;
+  if (snapshot.missing.length > 0) {
+    console.warn(`Project ${projectId} references ${snapshot.missing.length} missing mesh blob(s)`);
+  }
+  return {
+    id: projectId,
+    revision: snapshot.revision,
+    shapes: snapshot.shapes,
+    history: snapshot.history,
+    historyIndex: snapshot.historyIndex,
+    updatedAt: snapshot.revision,
+  };
 }
 
-async function saveProjectShapes(projectId: string, entry: ProjectShapeCacheEntry) {
-  const database = await openProjectShapesDb();
-  return new Promise<void>((resolve, reject) => {
-    const transaction = database.transaction(PROJECT_SHAPES_STORE_NAME, "readwrite");
-    const store = transaction.objectStore(PROJECT_SHAPES_STORE_NAME);
-    const existingRequest = store.get(projectId);
-    existingRequest.onerror = () => {
-      transaction.abort();
-    };
-    existingRequest.onsuccess = () => {
-      const existing = existingRequest.result as ProjectShapeRecord | undefined;
-      if (existing && existing.revision > entry.revision) {
-        return;
-      }
-      store.put({ id: projectId, ...entry, updatedAt: Date.now() } satisfies ProjectShapeRecord);
-    };
-    transaction.oncomplete = () => {
-      database.close();
-      resolve();
-    };
-    transaction.onerror = () => {
-      database.close();
-      reject(transaction.error ?? new Error("Could not save project shapes"));
-    };
-    transaction.onabort = () => {
-      database.close();
-      reject(transaction.error ?? new Error("Could not save project shapes"));
-    };
-  });
+function saveProjectShapes(projectId: string, entry: ProjectShapeCacheEntry, options?: { fullHistory?: boolean }) {
+  return saveStoredProject(projectId, entry, options);
 }
 
-async function deleteProjectShapes(projectId: string) {
-  const database = await openProjectShapesDb();
-  return new Promise<void>((resolve, reject) => {
-    const transaction = database.transaction(PROJECT_SHAPES_STORE_NAME, "readwrite");
-    transaction.objectStore(PROJECT_SHAPES_STORE_NAME).delete(projectId);
-    transaction.oncomplete = () => {
-      database.close();
-      resolve();
-    };
-    transaction.onerror = () => {
-      database.close();
-      reject(transaction.error ?? new Error("Could not delete project shapes"));
-    };
-  });
+function deleteProjectShapes(projectId: string) {
+  return deleteStoredProject(projectId);
 }
 
 async function saveProjectThumbnail(
@@ -773,26 +725,41 @@ function newProject(name: string, index: number, shapeCount = 0, folderId: strin
   };
 }
 
+function peakcadProjectMeta(project: DashboardProject, shapeCount: number): PeakcadProjectMeta {
+  return {
+    id: project.id,
+    name: project.name,
+    createdAt: project.createdAt,
+    updatedAt: project.updatedAt,
+    accent: project.accent,
+    shapes: shapeCount,
+    revision: project.revision,
+    workspace: project.workspace,
+    snapGrid: project.snapGrid,
+    thumbnailUrl: project.thumbnailUrl ?? null,
+    thumbnailUrlDark: project.thumbnailUrlDark ?? null,
+    thumbnailVersion: project.thumbnailVersion,
+  };
+}
+
 function buildDocumentForProject(project: DashboardProject, entry: ProjectShapeCacheEntry): PeakcadDocument {
   return buildPeakcadDocument({
-    project: {
-      id: project.id,
-      name: project.name,
-      createdAt: project.createdAt,
-      updatedAt: project.updatedAt,
-      accent: project.accent,
-      shapes: entry.shapes.length,
-      revision: project.revision,
-      workspace: project.workspace,
-      snapGrid: project.snapGrid,
-      thumbnailUrl: project.thumbnailUrl ?? null,
-      thumbnailUrlDark: project.thumbnailUrlDark ?? null,
-      thumbnailVersion: project.thumbnailVersion,
-    },
+    project: peakcadProjectMeta(project, entry.shapes.length),
     shapes: entry.shapes,
     history: entry.history,
     historyIndex: entry.historyIndex,
   });
+}
+
+/**
+ * `.peakcad` text for a project, serialized by the project-store worker from what it has stored
+ * (so mesh arrays are never copied into JSON on the main thread). Falls back to in-thread
+ * serialization only if the store has no record.
+ */
+async function serializeProjectForDisk(project: DashboardProject, entry: ProjectShapeCacheEntry) {
+  await saveProjectShapes(project.id, entry, { fullHistory: true }).catch(() => undefined);
+  const text = await serializeStoredProject(project.id, peakcadProjectMeta(project, entry.shapes.length)).catch(() => null);
+  return text ?? serializePeakcadDocument(buildDocumentForProject(project, entry));
 }
 
 export default function Home() {
@@ -827,6 +794,15 @@ export default function Home() {
   dashboardOrderRef.current = dashboardOrder;
   activeProjectIdRef.current = activeProjectId;
   const createAndOpenProjectRef = useRef<(name?: string) => void>(() => undefined);
+  /** Set only while an editor is mounted; asks before leaving a project with unsaved changes. */
+  const editorLeaveGuardRef = useRef<EditorLeaveGuard | null>(null);
+  const registerEditorLeaveGuard = useCallback((guard: EditorLeaveGuard | null) => {
+    editorLeaveGuardRef.current = guard;
+  }, []);
+  const confirmLeaveEditor = useCallback(
+    () => editorLeaveGuardRef.current?.confirmLeave() ?? Promise.resolve(true),
+    [],
+  );
 
   useEffect(() => {
     applyUiTheme(loadUiTheme());
@@ -915,7 +891,7 @@ export default function Home() {
               );
               continue;
             }
-            await saveProjectShapes(projectId, entry);
+            await saveProjectShapes(projectId, entry, { fullHistory: true });
             migrated[projectId] = entry;
           } catch {
             setDashboardNotice("Could not migrate project shapes to larger storage");
@@ -1297,7 +1273,7 @@ export default function Home() {
         document.historyIndex,
       );
       setProjectShapesById((current) => ({ ...current, [project.id]: entry }));
-      void saveProjectShapes(project.id, entry).catch(() => {
+      void saveProjectShapes(project.id, entry, { fullHistory: true }).catch(() => {
         setDashboardNotice("Could not store the opened project locally.");
       });
       if (document.project.thumbnailUrl) {
@@ -1342,37 +1318,42 @@ export default function Home() {
     projectId: string,
     forceSaveAs = false,
     entryOverride?: ProjectShapeCacheEntry,
-  ) => {
+  ): Promise<boolean> => {
     const project = projectsRef.current.find((item) => item.id === projectId);
-    if (!project) return;
+    if (!project) return false;
     const cached =
       entryOverride ??
       projectShapesByIdRef.current[projectId] ??
       projectShapeCacheEntry(project.revision ?? project.updatedAt, []);
     try {
-      const document = buildDocumentForProject(project, cached);
+      const text = await serializeProjectForDisk(project, cached);
       if (!forceSaveAs && project.filePath && hasDesktopProjectFiles()) {
-        await writePeakcadPath(project.filePath, document);
+        await writePeakcadText(project.filePath, text);
         lastDiskRevisionRef.current[projectId] = cached.revision;
         setProjects((current) =>
           current.map((item) => (item.id === projectId ? withSavedPeakcadFile(item, project.filePath) : item)),
         );
         setDashboardNotice(`Saved ${peakcadBasename(project.filePath)}`);
-        return;
+        return true;
       }
-      const nextPath = await savePeakcadAs(document, project.name);
+      const nextPath = await savePeakcadTextAs(text, project.name);
       if (nextPath) {
         lastDiskRevisionRef.current[projectId] = cached.revision;
         setProjects((current) => current.map((item) => (item.id === projectId ? withSavedPeakcadFile(item, nextPath) : item)));
         setDashboardNotice(`Saved ${peakcadBasename(nextPath)}`);
-      } else if (!hasDesktopProjectFiles()) {
+        return true;
+      }
+      if (!hasDesktopProjectFiles()) {
         setProjects((current) =>
           current.map((item) => (item.id === projectId ? withSavedPeakcadFile(item, null, peakcadFilename(project.name)) : item)),
         );
         setDashboardNotice(`Downloaded ${peakcadFilename(project.name)}`);
+        return true;
       }
+      return false;
     } catch (error) {
       setDashboardNotice(error instanceof Error ? error.message : "Could not save the PeakCAD file.");
+      return false;
     }
   }, []);
 
@@ -1382,9 +1363,11 @@ export default function Home() {
     const cached = projectShapesByIdRef.current[projectId];
     if (!latest || !cached) return;
     lastDiskRevisionRef.current[projectId] = cached.revision;
-    void writePeakcadPath(filePath, buildDocumentForProject({ ...latest, filePath }, cached)).catch((error) => {
-      setDashboardNotice(error instanceof Error ? error.message : "Could not save the PeakCAD file.");
-    });
+    void serializeProjectForDisk({ ...latest, filePath }, cached)
+      .then((text) => writePeakcadText(filePath, text))
+      .catch((error) => {
+        setDashboardNotice(error instanceof Error ? error.message : "Could not save the PeakCAD file.");
+      });
   }, []);
 
   useEffect(() => {
@@ -1538,11 +1521,10 @@ export default function Home() {
       await saveProjectShapes(snapshot.projectId, entry);
       const project = projectsRef.current.find((item) => item.id === snapshot.projectId);
       if (project?.filePath && hasDesktopProjectFiles()) {
-        const document = buildDocumentForProject(
-          { ...project, shapes: snapshot.shapes.length, updatedAt: revision, revision },
-          entry,
-        );
-        await writePeakcadPath(project.filePath, document);
+        const meta = peakcadProjectMeta({ ...project, updatedAt: revision, revision }, snapshot.shapes.length);
+        const text = await serializeStoredProject(snapshot.projectId, meta).catch(() => null)
+          ?? serializePeakcadDocument(buildDocumentForProject({ ...project, updatedAt: revision, revision }, entry));
+        await writePeakcadText(project.filePath, text);
         lastDiskRevisionRef.current[snapshot.projectId] = revision;
       }
     });
@@ -1828,22 +1810,25 @@ export default function Home() {
 
   useEffect(() => {
     return subscribePeakcadOpenPath((filePath) => {
-      void readPeakcadPath(filePath)
-        .then((opened) => applyOpenedDocument(opened, true))
-        .catch((error) => {
+      void (async () => {
+        if (!(await confirmLeaveEditor())) return;
+        try {
+          applyOpenedDocument(await readPeakcadPath(filePath), true);
+        } catch (error) {
           setDashboardNotice(error instanceof Error ? error.message : "Could not open that PeakCAD file.");
-        });
+        }
+      })();
     });
-  }, [applyOpenedDocument]);
+  }, [applyOpenedDocument, confirmLeaveEditor]);
 
   useEffect(() => {
     return subscribePeakcadMenu((action) => {
-      if (action === "new") {
-        createAndOpenProjectRef.current();
-        return;
-      }
-      if (action === "open") {
-        void openFromDisk();
+      if (action === "new" || action === "open") {
+        void (async () => {
+          if (!(await confirmLeaveEditor())) return;
+          if (action === "new") createAndOpenProjectRef.current();
+          else await openFromDisk();
+        })();
         return;
       }
       const projectId = activeProjectIdRef.current;
@@ -1853,10 +1838,37 @@ export default function Home() {
         }
         return;
       }
+      // The editor's save bakes exact STEP for new imports before writing.
+      if (editorLeaveGuardRef.current) {
+        void editorLeaveGuardRef.current.save(action);
+        return;
+      }
       const project = projectsRef.current.find((item) => item.id === projectId);
       void saveProjectToDisk(projectId, action === "save-as" || !projectMatchesSavedFile(project));
     });
-  }, [openFromDisk, saveProjectToDisk]);
+  }, [confirmLeaveEditor, openFromDisk, saveProjectToDisk]);
+
+  useEffect(() => {
+    return subscribePeakcadSaveBeforeClose(async () => {
+      const projectId = activeProjectIdRef.current;
+      const guard = editorLeaveGuardRef.current;
+      if (!guard || !projectId) return true;
+      if (!(await guard.save("save"))) return false;
+      // Explicit save only queues the IndexedDB write; the window is destroyed as soon as this resolves.
+      let queue = projectShapeSaveQueuesRef.current[projectId];
+      while (queue) {
+        try {
+          await queue;
+        } catch {
+          return false;
+        }
+        const next = projectShapeSaveQueuesRef.current[projectId];
+        if (next === queue) break;
+        queue = next;
+      }
+      return true;
+    });
+  }, []);
 
   useEffect(() => {
     if (view === "editor" && isIntroProjectId(activeProjectId) && !hasIntroCoachBeenDismissed()) {
@@ -1952,6 +1964,7 @@ export default function Home() {
               }
             }}
             hasMatchingSavedFile={projectMatchesSavedFile(activeProject)}
+            onRegisterLeaveGuard={registerEditorLeaveGuard}
             onSaveProject={(snapshot) => {
               const entry = projectShapeCacheEntry(
                 Date.now(),
@@ -1960,7 +1973,7 @@ export default function Home() {
                 snapshot.historyIndex,
               );
               const project = projectsRef.current.find((item) => item.id === snapshot.projectId);
-              void saveProjectToDisk(snapshot.projectId, !projectMatchesSavedFile(project), entry);
+              return saveProjectToDisk(snapshot.projectId, !projectMatchesSavedFile(project), entry);
             }}
             onSaveProjectAs={(snapshot) => {
               const entry = projectShapeCacheEntry(
@@ -1969,7 +1982,7 @@ export default function Home() {
                 snapshot.history,
                 snapshot.historyIndex,
               );
-              void saveProjectToDisk(snapshot.projectId, true, entry);
+              return saveProjectToDisk(snapshot.projectId, true, entry);
             }}
           />
           {introCoachOpen ? (
@@ -2721,7 +2734,10 @@ function Dashboard({
           }}
         >
           <img className="peakcad-logo" src="assets/peakcad/peakcad-logo.png" alt="PeakCAD" />
-          <span className="dashboard-brand-name">PeakCAD</span>
+          <span className="dashboard-brand-lockup">
+            <span className="dashboard-brand-name">PeakCAD</span>
+            <span className="dashboard-brand-mark">Peak Horology</span>
+          </span>
         </button>
         <div className="dashboard-topbar-tools">
           <div className="dashboard-search">
