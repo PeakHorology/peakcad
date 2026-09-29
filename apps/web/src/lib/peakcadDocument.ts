@@ -6,7 +6,10 @@ import type { GridSize, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/typ
 export const PEAKCAD_FORMAT = "peakcad";
 export const PEAKCAD_DOCUMENT_VERSION = 1;
 export const PEAKCAD_FILE_EXTENSION = ".peakcad";
-export const PEAKCAD_MAX_BYTES = 80 * 1024 * 1024;
+/** Close to V8's max string length (JSON.stringify fails past it). Keep in sync with electron/peakcadPath.cjs. */
+export const PEAKCAD_MAX_BYTES = 512 * 1024 * 1024;
+/** Undo history is dropped from files past this size so large imports do not double the file. */
+const PEAKCAD_HISTORY_MAX_BYTES = 80 * 1024 * 1024;
 
 export type PeakcadAccent = "cyan" | "green" | "gold" | "red";
 
@@ -154,7 +157,8 @@ export function serializePeakcadDocument(document: PeakcadDocument) {
   for (const attempt of attempts) {
     try {
       const text = encodePeakcadJson(buildPeakcadDocument(attempt));
-      if (peakcadByteLength(text) <= PEAKCAD_MAX_BYTES) {
+      const limit = attempt.history ? PEAKCAD_HISTORY_MAX_BYTES : PEAKCAD_MAX_BYTES;
+      if (peakcadByteLength(text) <= limit) {
         return text;
       }
     } catch (error) {

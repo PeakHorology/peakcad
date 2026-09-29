@@ -2890,6 +2890,7 @@ export function WorkplaneViewport({
       viewNudgeAxesRef.current = computeViewNudgeAxes(state.camera);
     }
     rebuildShapes(state, shapesRef.current, renderSelectionIds());
+    markShadowsDirty(state);
 
     const animate = () => {
       state.animationId = window.requestAnimationFrame(animate);
@@ -3909,7 +3910,13 @@ export function WorkplaneViewport({
     const hits: string[] = [];
     const seen = new Set<string>();
     const intersections = state.raycaster.intersectObjects(state.shapeLayer.children, true);
+    // Outline lines use a world-space threshold (1.15 mm). On a tight assembly that tube
+    // sits in front of the neighboring solid, so the first hit was the outline, not the part
+    // under the cursor. Body picks use the mesh surface only; edges stay for fillet picking.
     intersections.forEach((entry) => {
+      if (!(entry.object instanceof THREE.Mesh)) {
+        return;
+      }
       const id = entry.object.userData.shapeId;
       if (typeof id !== "string" || seen.has(id)) {
         return;
@@ -3925,7 +3932,9 @@ export function WorkplaneViewport({
       return hits;
     }
 
-    // Soft fallback: nearby shape centers, nearest first (still supports cycling).
+    // A ray that misses every surface may still be a near-miss on one isolated part.
+    // A wide center magnet (previously up to 112 px, sized from the part) selected the
+    // big neighbor whenever two parts sat close together.
     const nearby: Array<{ id: string; distance: number }> = [];
     shapesRef.current.forEach((shape) => {
       if (shape.hidden) {
@@ -3935,13 +3944,18 @@ export function WorkplaneViewport({
       const screenX = rect.left + ((center.x + 1) / 2) * rect.width;
       const screenY = rect.top + ((1 - center.y) / 2) * rect.height;
       const distance = Math.hypot(clientX - screenX, clientY - screenY);
-      const hitRadius = clamp(Math.max(shapeWidth(shape), shapeDepth(shape)) * 2.6, 48, 112);
-      if (distance <= hitRadius) {
+      if (distance <= 14) {
         nearby.push({ id: shape.id, distance });
       }
     });
     nearby.sort((a, b) => a.distance - b.distance);
-    return nearby.map((entry) => entry.id);
+    if (nearby.length === 0) {
+      return [];
+    }
+    if (nearby.length > 1 && nearby[1].distance - nearby[0].distance < 8) {
+      return [];
+    }
+    return [nearby[0].id];
   }, []);
 
   const pickShape = useCallback((clientX: number, clientY: number) => pickShapesAt(clientX, clientY)[0] ?? null, [pickShapesAt]);
@@ -4581,17 +4595,19 @@ export function WorkplaneViewport({
       if (threeRef.current) {
         const previewShapes = previewShapesForDrag(shapesRef.current, drag);
         updateSelectedGroundFootprintPreviews(threeRef.current, drag);
-        markShadowsDirty(threeRef.current);
-        syncTransformOverlay(
-          threeRef.current,
-          previewShapes,
-          selectedIdsRef.current,
-          transformOverlayRef,
-          setTransformOverlay,
-          workspaceRef.current,
-          true,
-        );
-        threeRef.current.lastOverlaySync = performance.now();
+        const now = performance.now();
+        if (now - threeRef.current.lastOverlaySync >= 48) {
+          syncTransformOverlay(
+            threeRef.current,
+            previewShapes,
+            selectedIdsRef.current,
+            transformOverlayRef,
+            setTransformOverlay,
+            workspaceRef.current,
+            true,
+          );
+          threeRef.current.lastOverlaySync = now;
+        }
         threeRef.current.needsRender = true;
       }
     },
@@ -4714,6 +4730,8 @@ export function WorkplaneViewport({
         }
         state.controls.enabled = true;
         state.needsRender = true;
+        // One shadow update after the move, not one per pointer event.
+        markShadowsDirty(state);
       }
       onInteractionActiveChange?.(false);
     },
@@ -5536,7 +5554,9 @@ function createThreeScene(host: HTMLDivElement): ThreeState {
   const key = new THREE.DirectionalLight("#ffffff", 3.1);
   key.position.set(70, 130, 75);
   key.castShadow = true;
-  key.shadow.autoUpdate = true;
+  // The light does not follow the camera. Rebuilding the shadow map on every orbit
+  // or drag frame redraws the whole assembly. Update it only when geometry moves.
+  key.shadow.autoUpdate = false;
   key.shadow.camera.left = -130;
   key.shadow.camera.right = 130;
   key.shadow.camera.top = 130;
@@ -6080,6 +6100,33 @@ function shapeRenderFingerprint(shape: WorkplaneShape, showEdges: boolean) {
   return `${projectShapesFingerprint([shape])}|edges:${showEdges ? 1 : 0}${shapeTessellationFingerprint(shape, quality)}`;
 }
 
+/** Pose lives on the Object3D. A move or turn must not rebuild the mesh. */
+function shapeGeometryFingerprint(shape: WorkplaneShape, showEdges: boolean) {
+  return shapeRenderFingerprint({
+    ...shape,
+    x: 0,
+    z: 0,
+    elevation: 0,
+    rotation: 0,
+    rotationX: 0,
+    rotationZ: 0,
+    mirrorX: undefined,
+    mirrorY: undefined,
+    mirrorZ: undefined,
+  }, showEdges);
+}
+
+function applyShapePose(object: THREE.Object3D, shape: WorkplaneShape) {
+  object.position.set(shape.x, (shape.elevation ?? 0) + shape.height / 2, shape.z);
+  object.rotation.set(
+    THREE.MathUtils.degToRad(shape.rotationX ?? 0),
+    THREE.MathUtils.degToRad(shape.rotation),
+    THREE.MathUtils.degToRad(shape.rotationZ ?? 0),
+  );
+  object.scale.set(mirrorSign(shape.mirrorX), mirrorSign(shape.mirrorY), mirrorSign(shape.mirrorZ));
+  object.updateMatrixWorld(true);
+}
+
 function rebuildShapes(state: ThreeState | null, shapes: WorkplaneShape[], selectedIds: string[], showCutPreviews = true) {
   if (!state) {
     return;
@@ -6098,9 +6145,10 @@ function rebuildShapes(state: ThreeState | null, shapes: WorkplaneShape[], selec
   const keepIds = new Set<string>();
   visibleShapes.forEach((shape) => {
     const showEdges = selected.has(shape.id);
-    const fingerprint = shapeRenderFingerprint(shape, showEdges);
+    const fingerprint = shapeGeometryFingerprint(shape, showEdges);
     const existing = existingById.get(shape.id);
     if (existing && existing.userData.renderFingerprint === fingerprint) {
+      applyShapePose(existing, shape);
       keepIds.add(shape.id);
       return;
     }
@@ -6133,6 +6181,9 @@ function rebuildShapes(state: ThreeState | null, shapes: WorkplaneShape[], selec
 
   rebuildSelectionHelpers(state, shapes, selectedIds);
   applyXrayClipping(state, state.xrayEnabled, state.xrayHeight);
+  // autoUpdate is off, so a fresh scene has no shadow map until this runs.
+  // Without it, MeshStandardMaterials stay blank until the first drag ends.
+  markShadowsDirty(state);
 }
 
 function applyMaterialClipping(material: THREE.Material | THREE.Material[], planes: THREE.Plane[], enableDoubleSide: boolean) {
@@ -7067,7 +7118,6 @@ function refreshDragPreviewObjects(state: ThreeState | null, drag: DragState | n
   if (!state || !drag) return;
   drag.items.forEach((item) => applyDragItemPreview(state, item));
   updateSelectedGroundFootprintPreviews(state, drag);
-  markShadowsDirty(state);
   state.needsRender = true;
 }
 
@@ -7580,7 +7630,8 @@ function addMesh(
 ) {
   const prepared = geometry.userData.cached ? geometry : putGeometryOnBase(geometry);
   const mesh = new THREE.Mesh(prepared, material);
-  mesh.castShadow = !shape.hole && !shape.construction;
+  const importedTriangles = shape.importedMesh?.triangleCount ?? 0;
+  mesh.castShadow = !shape.hole && !shape.construction && importedTriangles <= hardwareProfile().shadowCasterTriangleLimit;
   mesh.receiveShadow = false;
   if (position) {
     mesh.position.copy(position);
@@ -7607,12 +7658,11 @@ function addMesh(
     || shape.kind === "thread";
   const sharpDetailEdges =
     shape.kind === "mesh"
-    || Boolean(shape.importedMesh)
     || ["pyramid", "roof", "wedge"].includes(shape.kind);
   // Flat-faced primitives (box, polygon, …) need quiet crease lines when idle — lighting alone washes them out.
   const roundedBox = shape.kind === "box" && Boolean(shape.radius && shape.radius > 0);
-  const facetedSolid = !curvedSurface && !roundedBox;
-  const showIdleEdges = !shape.hole && !shape.construction && (sharpDetailEdges || facetedSolid);
+  const facetedSolid = !curvedSurface && !roundedBox && !shape.importedMesh;
+  const showIdleEdges = !shape.hole && !shape.construction && !shape.importedMesh && (sharpDetailEdges || facetedSolid);
   const importedTriangleCount = shape.importedMesh?.triangleCount ?? 0;
   const skipHeavyImportedEdges = Boolean(shape.importedMesh) && importedTriangleCount > IMPORTED_SELECTED_EDGE_TRIANGLE_LIMIT;
   const selectedOutline = Boolean(group.userData.showEdges);

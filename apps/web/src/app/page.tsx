@@ -1318,6 +1318,7 @@ export default function Home() {
     projectId: string,
     forceSaveAs = false,
     entryOverride?: ProjectShapeCacheEntry,
+    { throwOnError = false }: { throwOnError?: boolean } = {},
   ): Promise<boolean> => {
     const project = projectsRef.current.find((item) => item.id === projectId);
     if (!project) return false;
@@ -1352,6 +1353,7 @@ export default function Home() {
       }
       return false;
     } catch (error) {
+      if (throwOnError) throw error;
       setDashboardNotice(error instanceof Error ? error.message : "Could not save the PeakCAD file.");
       return false;
     }
@@ -1973,7 +1975,7 @@ export default function Home() {
                 snapshot.historyIndex,
               );
               const project = projectsRef.current.find((item) => item.id === snapshot.projectId);
-              return saveProjectToDisk(snapshot.projectId, !projectMatchesSavedFile(project), entry);
+              return saveProjectToDisk(snapshot.projectId, !projectMatchesSavedFile(project), entry, { throwOnError: true });
             }}
             onSaveProjectAs={(snapshot) => {
               const entry = projectShapeCacheEntry(
@@ -1982,7 +1984,7 @@ export default function Home() {
                 snapshot.history,
                 snapshot.historyIndex,
               );
-              return saveProjectToDisk(snapshot.projectId, true, entry);
+              return saveProjectToDisk(snapshot.projectId, true, entry, { throwOnError: true });
             }}
           />
           {introCoachOpen ? (

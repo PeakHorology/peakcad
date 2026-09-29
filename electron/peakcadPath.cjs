@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const EXTENSION = ".peakcad";
-const MAX_BYTES = 80 * 1024 * 1024;
+const MAX_BYTES = 512 * 1024 * 1024;
 
 function defaultProjectDir(app) {
   return path.join(app.getPath("documents"), "PeakCAD");

@@ -1306,7 +1306,11 @@
   top: calc(var(--editor-toolbar-height) + 8px);
   right: 18px;
   z-index: calc(var(--z-popover) + 1);
+  display: flex;
+  flex-direction: column;
   width: 322px;
+  max-height: calc(100vh - var(--editor-toolbar-height) - 24px);
+  overflow: hidden;
   color: var(--ink-strong);
   background: var(--tile-hover);
   border: 1px solid var(--control-border);
@@ -1345,7 +1349,16 @@
 .top-action-body {
   display: grid;
   gap: 10px;
+  min-height: 0;
   padding: 13px;
+  overflow: auto;
+}
+
+.export-panel-body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .top-action-body p {
@@ -1395,8 +1408,11 @@
 .export-body-list {
   display: grid;
   gap: 6px;
+  min-height: 0;
+  flex: 1 1 auto;
   margin: 0;
-  padding: 0;
+  padding: 0 2px 0 0;
+  overflow-y: auto;
   list-style: none;
 }
 

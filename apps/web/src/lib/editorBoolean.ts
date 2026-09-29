@@ -1978,10 +1978,13 @@ export async function manifoldUnionMeshShape(selection: WorkplaneShape[]): Promi
       elevation: (shape.elevation ?? 0) + (index % 2) * 0.01,
     }))
     : solids;
-  // Only a staggered union needs the scar-removal cleanup, which moves real vertices.
+  // The 0.05 mm coplanar weld is for primitive unions (knurls, hubs). A STEP body is
+  // tessellated near 0.001 mm, so that weld snaps unrelated vertices and stretches
+  // triangles across screws, teeth, and curved faces.
+  const importedOperands = solids.some((shape) => Boolean(shape.importedMesh));
   const unionCleanup: BooleanCleanupOptions = {
     staggeredUnion: solidsForUnion !== solids,
-    unifyCoplanar: true,
+    unifyCoplanar: !importedOperands,
   };
 
   const mergedSourceMesh = mergedSolidMeshData(solidsForUnion);
@@ -2888,7 +2891,9 @@ export async function occtBooleanMeshShape(
       solids,
       result.positions,
       `occt-${op}`,
-      op === "union" ? { unifyCoplanar: true } : undefined,
+      op === "union" && !selection.some((shape) => Boolean(shape.importedMesh))
+        ? { unifyCoplanar: true }
+        : undefined,
     );
     if (!group?.importedMesh) return null;
     const expected = boundsForShapes(selection);

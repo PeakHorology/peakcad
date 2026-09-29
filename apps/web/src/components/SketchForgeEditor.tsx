@@ -8617,27 +8617,12 @@ function TopActionPanel({
         </div>
       ) : null}
       {panel === "export" ? (
-        <div className="top-action-body">
+        <div className="top-action-body export-panel-body">
           <p>{shapeCount} {scopeLabel} solid shape{shapeCount === 1 ? "" : "s"} ready to export.</p>
           <button className="export-primary" onClick={onExportStep} disabled={stepExporting}>
             <ToolbarExportIcon />
             {stepExporting ? "Building STEP…" : "Download STEP"}
           </button>
-          {stepPreflight.length > 0 ? (
-            <ul className="export-body-list" aria-label="STEP quality by body">
-              {stepPreflight.map((row, index) => (
-                <li key={`${row.name}-${row.kind}-${index}`} className="export-body-row">
-                  <span className="export-body-row-name">{row.name || "Untitled"}</span>
-                  <span
-                    className={`cad-ready-badge${row.quality === "faceted" ? " cad-ready-badge--mesh" : ""}${row.quality === "pending" || row.quality === "unsupported" ? " cad-ready-badge--pending" : ""}`}
-                    title={row.detail}
-                  >
-                    {shapeExportQualityLabel(row.quality)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          ) : null}
           <p className="export-step-note">STEP is the manufacturing-grade path. Mesh formats below are for print and interchange.</p>
           <div className="export-mesh-actions">
             <button onClick={() => onExport("stl")}>
@@ -8655,6 +8640,21 @@ function TopActionPanel({
               </button>
             ) : null}
           </div>
+          {stepPreflight.length > 0 ? (
+            <ul className="export-body-list" aria-label="STEP quality by body">
+              {stepPreflight.map((row, index) => (
+                <li key={`${row.name}-${row.kind}-${index}`} className="export-body-row">
+                  <span className="export-body-row-name">{row.name || "Untitled"}</span>
+                  <span
+                    className={`cad-ready-badge${row.quality === "faceted" ? " cad-ready-badge--mesh" : ""}${row.quality === "pending" || row.quality === "unsupported" ? " cad-ready-badge--pending" : ""}`}
+                    title={row.detail}
+                  >
+                    {shapeExportQualityLabel(row.quality)}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       ) : null}
       {panel === "tips" ? (

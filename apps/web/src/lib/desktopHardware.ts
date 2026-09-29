@@ -11,6 +11,8 @@ export type HardwareProfile = {
   maxPixelRatio: number;
   preserveDrawingBuffer: boolean;
   shadowMapSize: number;
+  /** Imported meshes above this triangle count do not cast a shadow. */
+  shadowCasterTriangleLimit: number;
   maxAnisotropy: number;
   maxTextureSide: number;
   booleanTriangleLimit: number;
@@ -89,20 +91,25 @@ export function isDesktopShell() {
 export function getHardwareProfile(): HardwareProfile {
   const desktop = isDesktopShell();
   const cores = typeof navigator !== "undefined" ? navigator.hardwareConcurrency || 4 : 4;
-  const memoryGb = readNavigatorMemoryGb() || (desktop ? 16 : 4);
-  const highEnd = desktop || cores >= 8 || memoryGb >= 8;
+  const memoryGb = readNavigatorMemoryGb();
+  // Electron used to count as high-end on its own, so a small laptop paid for the same
+  // shadows and crease lines as a 16-core workstation. Cores decide the tier. Chrome
+  // caps deviceMemory at 8, so memory only pulls a machine down, not up.
+  const modest = cores < 8 || (memoryGb > 0 && memoryGb < 8);
+  const strong = !modest && cores >= 16;
 
-  if (!highEnd) {
+  if (modest) {
     return {
       desktop,
       highEnd: false,
-      maxPixelRatio: 2,
+      maxPixelRatio: 1,
       preserveDrawingBuffer: false,
-      shadowMapSize: 2048,
+      shadowMapSize: 1024,
+      shadowCasterTriangleLimit: 4_000,
       maxAnisotropy: 4,
       maxTextureSide: 2048,
       booleanTriangleLimit: 150_000,
-      importedEdgeTriangleLimit: 40_000,
+      importedEdgeTriangleLimit: 8_000,
       historyEntries: 100,
       historyBytes: 64 * 1024 * 1024,
       sketchHistoryEntries: 100,
@@ -119,15 +126,16 @@ export function getHardwareProfile(): HardwareProfile {
 
   return {
     desktop,
-    highEnd: true,
+    highEnd: strong,
     // Cap HiDPI fill-rate; uncapped 4K soft shadows were too expensive for static CAD scenes.
-    maxPixelRatio: 2,
+    maxPixelRatio: strong ? 2 : 1.5,
     preserveDrawingBuffer: false,
     shadowMapSize: 2048,
-    maxAnisotropy: 16,
+    shadowCasterTriangleLimit: strong ? 80_000 : 12_000,
+    maxAnisotropy: strong ? 16 : 8,
     maxTextureSide: 8192,
-    booleanTriangleLimit: 2_000_000,
-    importedEdgeTriangleLimit: 400_000,
+    booleanTriangleLimit: strong ? 2_000_000 : 400_000,
+    importedEdgeTriangleLimit: strong ? 400_000 : 16_000,
     historyEntries: 250,
     historyBytes: 512 * 1024 * 1024,
     sketchHistoryEntries: 250,
