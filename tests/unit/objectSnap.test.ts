@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { snapAabbFromShape, snapMovingAabb, unionSnapAabbs } from "@/lib/objectSnap";
+import { faceToFaceTranslation, snapAabbFromShape, snapMovingAabb, unionSnapAabbs } from "@/lib/objectSnap";
 import type { WorkplaneShape } from "@/types/sketchforge";
 
 function box(partial: Partial<WorkplaneShape> & Pick<WorkplaneShape, "id" | "x" | "z">): WorkplaneShape {
@@ -78,5 +78,25 @@ describe("unionSnapAabbs", () => {
       snapAabbFromShape(box({ id: "b", x: 20, z: 0 })),
     ]);
     expect(union).toMatchObject({ minX: -5, maxX: 25, minZ: -5, maxZ: 5 });
+  });
+});
+
+describe("faceToFaceTranslation", () => {
+  it("slides one side onto the facing side", () => {
+    const move = faceToFaceTranslation(
+      { point: [5, 5, 0], normal: [1, 0, 0] },
+      { point: [20, 4, 1], normal: [-1, 0, 0] },
+    );
+    expect(move?.x).toBeCloseTo(15);
+    expect(move?.y).toBeCloseTo(0);
+    expect(move?.z).toBeCloseTo(0);
+  });
+
+  it("ignores a sideways offset and only closes the gap between the sides", () => {
+    const move = faceToFaceTranslation(
+      { point: [5, 0, 0], normal: [1, 0, 0] },
+      { point: [20, 80, -40], normal: [-1, 0, 0] },
+    );
+    expect(move).toEqual({ x: 15, y: 0, z: 0 });
   });
 });

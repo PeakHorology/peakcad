@@ -330,9 +330,10 @@ export function ToolbarPreserveEdgeIcon(props: IconProps) {
 export function ToolbarSnapGridIcon(props: IconProps) {
   return (
     <CadGlyph {...props}>
-      <path d="M4 4h3.2M4 4v3.2M20 4h-3.2M20 4v3.2M4 20h3.2M4 20v-3.2M20 20h-3.2M20 20v-3.2" />
-      <rect x="8.5" y="8.5" width="7" height="7" rx="0.6" />
-      <circle cx="12" cy="12" r="1.15" fill="currentColor" stroke="none" />
+      <rect x="2.4" y="5.6" width="6.5" height="12.8" rx="0.7" />
+      <rect x="15.1" y="5.6" width="6.5" height="12.8" rx="0.7" />
+      <path d="M8.9 6.8v10.4" strokeWidth="2.35" />
+      <path d="M15.1 6.8v10.4" strokeWidth="2.35" />
     </CadGlyph>
   );
 }

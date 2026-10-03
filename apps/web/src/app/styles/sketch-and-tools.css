@@ -937,13 +937,13 @@
 
 .shape-sidebar-item {
   display: flex;
-  flex: 1 1 0;
+  flex: 0 0 auto;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 3px;
   width: 100%;
-  min-height: 58px;
+  min-height: 74px;
   padding: 2px 3px;
   color: var(--peak-text);
   background: transparent;
@@ -2235,6 +2235,23 @@
   position: absolute;
   inset: 0;
   z-index: calc(var(--z-viewport-ui) + 3);
+  pointer-events: none;
+}
+
+.measurement-fade {
+  position: absolute;
+  inset: 0;
+  z-index: calc(var(--z-viewport-ui) + 3);
+  opacity: 1;
+  pointer-events: none;
+  transition: opacity 90ms ease;
+}
+
+.measurement-fade.is-concealed {
+  opacity: 0;
+}
+
+.measurement-fade.is-concealed * {
   pointer-events: none;
 }
 

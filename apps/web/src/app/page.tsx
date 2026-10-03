@@ -1,6 +1,6 @@
 "use client";
 
-import { ArrowLeft, EllipsisVertical, FolderOpen, FolderPlus, Grid3X3, List, Pencil, Plus, Search, Settings, SlidersHorizontal, Star, Trash2, X } from "lucide-react";
+import { ArrowLeft, EllipsisVertical, FolderOpen, FolderPlus, Grid3X3, KeyRound, List, Lock, LockOpen, Pencil, Plus, Search, Settings, SlidersHorizontal, Star, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent } from "react";
 import { SketchForgeEditor, type EditorLeaveGuard } from "@/components/SketchForgeEditor";
 import { IntroCoach } from "@/components/workplane/IntroCoach";
@@ -54,6 +54,14 @@ import {
   writePeakcadText,
 } from "@/lib/peakcadFile";
 import { openProjectStoreDb, PROJECT_THUMBNAILS_STORE_NAME } from "@/lib/projectStoreOps";
+import {
+  folderKeepsProjectsInside,
+  hashFolderPassword,
+  parseFolderPasswordLock,
+  projectStaysInsideFolder,
+  verifyFolderPassword,
+  type FolderPasswordLock,
+} from "@/lib/folderLock";
 import { deleteStoredProject, loadStoredProject, saveStoredProject, serializeStoredProject } from "@/lib/projectStoreClient";
 
 type AppView = "dashboard" | "editor";
@@ -83,6 +91,20 @@ type DashboardFolder = {
   createdAt: number;
   updatedAt: number;
   heroProjectId: string | null;
+  passwordLock?: FolderPasswordLock | null;
+};
+
+type FolderAccessRequest = {
+  folderId: string;
+  projectId?: string;
+  opened?: { document: PeakcadDocument; path: string | null };
+};
+
+type LockDialogState = {
+  mode: "create" | "unlock" | "change" | "remove";
+  folderId: string;
+  projectId?: string;
+  opened?: FolderAccessRequest["opened"];
 };
 
 type StoredDashboardProject = Partial<DashboardProject> & {
@@ -430,13 +452,18 @@ function readFolders(): DashboardFolder[] {
     if (!Array.isArray(parsed)) return [];
     return parsed
       .filter((folder) => typeof folder.id === "string" && typeof folder.name === "string")
-      .map((folder) => ({
-        id: folder.id as string,
-        name: folder.name as string,
-        createdAt: typeof folder.createdAt === "number" ? folder.createdAt : Date.now(),
-        updatedAt: typeof folder.updatedAt === "number" ? folder.updatedAt : Date.now(),
-        heroProjectId: typeof folder.heroProjectId === "string" ? folder.heroProjectId : null,
-      }));
+      .map((folder) => {
+        const passwordLock = parseFolderPasswordLock(folder.passwordLock);
+        const next: DashboardFolder = {
+          id: folder.id as string,
+          name: folder.name as string,
+          createdAt: typeof folder.createdAt === "number" ? folder.createdAt : Date.now(),
+          updatedAt: typeof folder.updatedAt === "number" ? folder.updatedAt : Date.now(),
+          heroProjectId: typeof folder.heroProjectId === "string" ? folder.heroProjectId : null,
+        };
+        if (passwordLock) next.passwordLock = passwordLock;
+        return next;
+      });
   } catch {
     return [];
   }
@@ -579,13 +606,22 @@ function sortByIdOrder<T extends { id: string }>(items: T[], order: string[] | n
 }
 
 function folderForStorage(folder: DashboardFolder): DashboardFolder {
-  return {
+  const stored: DashboardFolder = {
     id: folder.id,
     name: folder.name,
     createdAt: folder.createdAt,
     updatedAt: folder.updatedAt,
     heroProjectId: folder.heroProjectId,
   };
+  if (folder.passwordLock) {
+    stored.passwordLock = {
+      algorithm: folder.passwordLock.algorithm,
+      iterations: folder.passwordLock.iterations,
+      salt: folder.passwordLock.salt,
+      hash: folder.passwordLock.hash,
+    };
+  }
+  return stored;
 }
 
 function newFolder(name: string): DashboardFolder {
@@ -767,8 +803,13 @@ export default function Home() {
   const [view, setView] = useState<AppView>("dashboard");
   const [editorStarted, setEditorStarted] = useState(false);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
+  const [openingProjectId, setOpeningProjectId] = useState<string | null>(null);
+  const [openSpinner, setOpenSpinner] = useState(false);
+  const [viewportReady, setViewportReady] = useState(false);
   const [projects, setProjects] = useState<DashboardProject[]>([]);
   const [folders, setFolders] = useState<DashboardFolder[]>([]);
+  const [unlockedFolderIds, setUnlockedFolderIds] = useState<string[]>([]);
+  const [folderAccessRequest, setFolderAccessRequest] = useState<FolderAccessRequest | null>(null);
   const [query, setQuery] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
   const [sortMode, setSortMode] = useState("custom");
@@ -783,6 +824,8 @@ export default function Home() {
   const nextProjectRevisionRef = useRef(0);
   const projectShapeSaveQueuesRef = useRef<Record<string, Promise<void>>>({});
   const projectsRef = useRef<DashboardProject[]>([]);
+  const foldersRef = useRef<DashboardFolder[]>([]);
+  const unlockedFolderIdsRef = useRef<Set<string>>(new Set());
   const projectShapesByIdRef = useRef<Record<string, ProjectShapeCacheEntry>>({});
   const projectFolderMapRef = useRef<Record<string, string | null>>({});
   const lastDiskRevisionRef = useRef<Record<string, number>>({});
@@ -790,6 +833,7 @@ export default function Home() {
   const dashboardOrderRef = useRef<DashboardOrder>(emptyDashboardOrder());
   const activeProjectIdRef = useRef<string | null>(activeProjectId);
   projectsRef.current = projects;
+  foldersRef.current = folders;
   projectShapesByIdRef.current = projectShapesById;
   dashboardOrderRef.current = dashboardOrder;
   activeProjectIdRef.current = activeProjectId;
@@ -803,6 +847,36 @@ export default function Home() {
     () => editorLeaveGuardRef.current?.confirmLeave() ?? Promise.resolve(true),
     [],
   );
+
+  const unlockFolderSession = useCallback((folderId: string) => {
+    if (unlockedFolderIdsRef.current.has(folderId)) return;
+    const next = new Set(unlockedFolderIdsRef.current);
+    next.add(folderId);
+    unlockedFolderIdsRef.current = next;
+    setUnlockedFolderIds([...next]);
+  }, []);
+
+  const lockFolderSession = useCallback((folderId: string) => {
+    if (!unlockedFolderIdsRef.current.has(folderId)) return;
+    const next = new Set(unlockedFolderIdsRef.current);
+    next.delete(folderId);
+    unlockedFolderIdsRef.current = next;
+    setUnlockedFolderIds([...next]);
+  }, []);
+
+  const setFolderPasswordLock = useCallback((folderId: string, passwordLock: FolderPasswordLock | null) => {
+    setFolders((current) =>
+      current.map((folder) => (folder.id === folderId ? { ...folder, passwordLock, updatedAt: Date.now() } : folder)),
+    );
+    if (!passwordLock) lockFolderSession(folderId);
+  }, [lockFolderSession]);
+
+  const projectNeedsFolderPassword = (projectId: string) => {
+    const project = projectsRef.current.find((item) => item.id === projectId) ?? readProjects().find((item) => item.id === projectId);
+    if (!project?.folderId || !projectStaysInsideFolder(project, foldersRef.current)) return null;
+    if (unlockedFolderIdsRef.current.has(project.folderId)) return null;
+    return project.folderId;
+  };
 
   useEffect(() => {
     applyUiTheme(loadUiTheme());
@@ -929,8 +1003,16 @@ export default function Home() {
     setDownloadFolder(window.localStorage.getItem(DOWNLOAD_FOLDER_STORAGE_KEY) ?? "");
 
     const params = new URLSearchParams(window.location.search);
-    if (params.has("codexBooleanCase") || params.get("editor") === "1") {
-      const requestedProjectId = params.get("project");
+    const wantsEditor = params.has("codexBooleanCase") || params.get("editor") === "1";
+    const requestedProjectId = params.get("project");
+    const requestedProject = requestedProjectId ? homeProjects.find((project) => project.id === requestedProjectId) : null;
+    const requestedFolder = requestedProject?.folderId
+      ? storedFolders.find((folder) => folder.id === requestedProject.folderId && folder.passwordLock)
+      : null;
+    if (wantsEditor && requestedFolder && requestedProject) {
+      setFolderAccessRequest({ folderId: requestedFolder.id, projectId: requestedProject.id });
+      window.history.replaceState(null, "", "/");
+    } else if (wantsEditor) {
       if (requestedProjectId && storedProjects.some((project) => project.id === requestedProjectId)) {
         setActiveProjectId(requestedProjectId);
       }
@@ -1099,6 +1181,12 @@ export default function Home() {
   }, [activeProjectId, mounted, projects]);
 
   useEffect(() => {
+    if (!openingProjectId) return;
+    const timer = window.setTimeout(() => setOpenSpinner(true), 120);
+    return () => window.clearTimeout(timer);
+  }, [openingProjectId]);
+
+  useEffect(() => {
     if (!mounted) return;
     try {
       window.localStorage.setItem(DOWNLOAD_FOLDER_STORAGE_KEY, downloadFolder);
@@ -1192,6 +1280,8 @@ export default function Home() {
     const matched = folders.filter((folder) => {
       if (!normalizedQuery) return true;
       if (folder.name.toLowerCase().includes(normalizedQuery)) return true;
+      // A passworded folder's projects are not searchable from outside it.
+      if (folderKeepsProjectsInside(folder)) return false;
       return projectsInFolder(projects, folder.id).some((project) => project.name.toLowerCase().includes(normalizedQuery));
     });
     if (sortMode === "name") return [...matched].sort((a, b) => a.name.localeCompare(b.name));
@@ -1202,15 +1292,27 @@ export default function Home() {
   const rootProjects = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
     const matched = projects.filter((project) => {
+      if (projectStaysInsideFolder(project, folders)) return false;
       if (!normalizedQuery) return true;
       return project.name.toLowerCase().includes(normalizedQuery);
     });
     if (sortMode === "name") return [...matched].sort((a, b) => a.name.localeCompare(b.name));
     if (sortMode === "recent") return [...matched].sort((a, b) => b.updatedAt - a.updatedAt);
     return sortByIdOrder(matched, dashboardOrder.projects);
-  }, [dashboardOrder.projects, projects, query, sortMode]);
+  }, [dashboardOrder.projects, folders, projects, query, sortMode]);
 
   const openEditor = (projectId: string | null, options: { allowMissingFromStorage?: boolean } = {}) => {
+    if (projectId) {
+      const lockedFolderId = projectNeedsFolderPassword(projectId);
+      if (lockedFolderId) {
+        setFolderAccessRequest((current) =>
+          current?.folderId === lockedFolderId && current.projectId === projectId && !current.opened
+            ? current
+            : { folderId: lockedFolderId, projectId },
+        );
+        return;
+      }
+    }
     if (projectId && typeof window !== "undefined" && !options.allowMissingFromStorage) {
       const storedProjects = readProjects();
       const storedProject = storedProjects.find((project) => project.id === projectId);
@@ -1235,6 +1337,9 @@ export default function Home() {
       setProjects((current) => current.map((project) => (project.id === projectId ? { ...project, updatedAt: Date.now() } : project)));
     }
     setActiveProjectId(projectId);
+    setOpeningProjectId(projectId);
+    setOpenSpinner(false);
+    setViewportReady(false);
     setEditorStarted(true);
     setView("editor");
     if (typeof window !== "undefined") {
@@ -1249,6 +1354,13 @@ export default function Home() {
       const existing = projectsRef.current.find(
         (project) => project.id === document.project.id || (path != null && project.filePath === path),
       );
+      if (shouldOpen && existing?.folderId) {
+        const folder = foldersRef.current.find((item) => item.id === existing.folderId);
+        if (folder?.passwordLock && !unlockedFolderIdsRef.current.has(folder.id)) {
+          setFolderAccessRequest({ folderId: folder.id, opened });
+          return;
+        }
+      }
       const project: DashboardProject = {
         id: existing?.id ?? document.project.id,
         name: document.project.name,
@@ -1658,6 +1770,9 @@ export default function Home() {
   };
 
   const openDashboard = () => {
+    setOpeningProjectId(null);
+    setOpenSpinner(false);
+    setViewportReady(false);
     if (activeProjectId) {
       setProjects((current) => current.map((project) => (project.id === activeProjectId ? { ...project, updatedAt: Date.now() } : project)));
     }
@@ -1889,6 +2004,14 @@ export default function Home() {
   const activeProject = activeProjectId ? projects.find((project) => project.id === activeProjectId) ?? null : null;
   const activeProjectShapeEntry = activeProjectId ? projectShapesById[activeProjectId] : null;
   const canRenderEditor = !activeProjectId || (Boolean(activeProject) && Boolean(activeProjectShapeEntry));
+  const openingShapes = openingProjectId ? projectShapesById[openingProjectId]?.shapes : undefined;
+  let openingTriangles = 0;
+  for (const shape of openingShapes ?? []) openingTriangles += shape.importedMesh?.triangleCount ?? 0;
+  const openingHeavy = openingTriangles > 80_000;
+  const openingName = openingProjectId ? projects.find((project) => project.id === openingProjectId)?.name ?? "Project" : "";
+  const showOpeningOverlay = Boolean(
+    view === "editor" && openingProjectId && (openSpinner || (openingHeavy && !viewportReady)),
+  );
 
   const projectDebugSummary = projects.map((project) => ({
     id: project.id,
@@ -1942,7 +2065,23 @@ export default function Home() {
           onSetFolderHero={setFolderHero}
           onSortModeChange={setSortMode}
           onViewModeChange={setViewMode}
+          unlockedFolderIds={unlockedFolderIds}
+          folderAccessRequest={folderAccessRequest}
+          onUnlockFolderSession={unlockFolderSession}
+          onLockFolderSession={lockFolderSession}
+          onSetFolderPassword={setFolderPasswordLock}
+          onApplyOpenedDocument={(opened) => applyOpenedDocument(opened, true)}
+          onFolderAccessRequestHandled={() => setFolderAccessRequest(null)}
         />
+      ) : null}
+      {showOpeningOverlay ? (
+        <div className="project-open-overlay" role="status" aria-live="polite">
+          <div className="model-loading-card">
+            <span className="model-loading-wheel" aria-hidden="true" />
+            <strong>Opening project…</strong>
+            <span className="model-loading-file">{openingName}</span>
+          </div>
+        </div>
       ) : null}
       {view === "editor" && editorStarted && canRenderEditor ? (
         <div className="editor-stage active">
@@ -1967,6 +2106,11 @@ export default function Home() {
             }}
             hasMatchingSavedFile={projectMatchesSavedFile(activeProject)}
             onRegisterLeaveGuard={registerEditorLeaveGuard}
+            onViewportReady={() => {
+              setViewportReady(true);
+              setOpeningProjectId(null);
+              setOpenSpinner(false);
+            }}
             onSaveProject={(snapshot) => {
               const entry = projectShapeCacheEntry(
                 Date.now(),
@@ -2035,6 +2179,13 @@ function Dashboard({
   onSetFolderHero,
   onSortModeChange,
   onViewModeChange,
+  unlockedFolderIds,
+  folderAccessRequest,
+  onUnlockFolderSession,
+  onLockFolderSession,
+  onSetFolderPassword,
+  onApplyOpenedDocument,
+  onFolderAccessRequestHandled,
 }: {
   dashboardNotice: string;
   dashboardOrder: DashboardOrder;
@@ -2069,6 +2220,13 @@ function Dashboard({
   onSetFolderHero: (folderId: string, projectId: string) => void;
   onSortModeChange: (value: string) => void;
   onViewModeChange: (value: ViewMode) => void;
+  unlockedFolderIds: readonly string[];
+  folderAccessRequest: FolderAccessRequest | null;
+  onUnlockFolderSession: (folderId: string) => void;
+  onLockFolderSession: (folderId: string) => void;
+  onSetFolderPassword: (folderId: string, passwordLock: FolderPasswordLock | null) => void;
+  onApplyOpenedDocument: (opened: NonNullable<FolderAccessRequest["opened"]>) => void;
+  onFolderAccessRequestHandled: () => void;
 }) {
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
   const [openFolderMenuId, setOpenFolderMenuId] = useState<string | null>(null);
@@ -2100,6 +2258,16 @@ function Dashboard({
   const [folderCreateOpen, setFolderCreateOpen] = useState(false);
   const [moveProjectId, setMoveProjectId] = useState<string | null>(null);
   const [nameDraft, setNameDraft] = useState("");
+  const [lockDialog, setLockDialog] = useState<LockDialogState | null>(null);
+  const [passwordDraft, setPasswordDraft] = useState("");
+  const [passwordConfirm, setPasswordConfirm] = useState("");
+  const [passwordCurrent, setPasswordCurrent] = useState("");
+  const [lockError, setLockError] = useState("");
+  const [lockBusy, setLockBusy] = useState(false);
+  const [deletePasswordDraft, setDeletePasswordDraft] = useState("");
+  const [deleteLockError, setDeleteLockError] = useState("");
+  const [deleteLockBusy, setDeleteLockBusy] = useState(false);
+  const sessionUnlockedRef = useRef(new Set(unlockedFolderIds));
 
   const projectPendingDelete = projects.find((project) => project.id === projectPendingDeleteId) ?? null;
   const projectPendingRename = projects.find((project) => project.id === projectPendingRenameId) ?? null;
@@ -2121,7 +2289,10 @@ function Dashboard({
 
   const showHomeOverview = !openFolder && !normalizedQuery;
   const recentProjects = showHomeOverview
-    ? [...projects].sort((left, right) => right.updatedAt - left.updatedAt).slice(0, RECENT_PROJECT_COUNT)
+    ? [...projects]
+        .filter((project) => !projectStaysInsideFolder(project, folders))
+        .sort((left, right) => right.updatedAt - left.updatedAt)
+        .slice(0, RECENT_PROJECT_COUNT)
     : [];
   const libraryProjects = rootProjects;
   const folderArrangeIds = rootFolders.map((folder) => folder.id);
@@ -2155,10 +2326,32 @@ function Dashboard({
   }, [folderPendingDeleteId, folders]);
 
   useEffect(() => {
+    sessionUnlockedRef.current = new Set(unlockedFolderIds);
+  }, [unlockedFolderIds]);
+
+  useEffect(() => {
     if (!openFolderId) return;
-    if (folders.some((folder) => folder.id === openFolderId)) return;
-    setOpenFolderId(null);
-  }, [openFolderId, folders]);
+    const folder = folders.find((item) => item.id === openFolderId);
+    const unlocked = unlockedFolderIds.includes(openFolderId) || sessionUnlockedRef.current.has(openFolderId);
+    if (!folder || (folder.passwordLock && !unlocked)) {
+      setOpenFolderId(null);
+    }
+  }, [openFolderId, folders, unlockedFolderIds]);
+
+  useEffect(() => {
+    if (!folderAccessRequest) return;
+    setLockDialog({
+      mode: "unlock",
+      folderId: folderAccessRequest.folderId,
+      projectId: folderAccessRequest.projectId,
+      opened: folderAccessRequest.opened,
+    });
+    setPasswordDraft("");
+    setPasswordConfirm("");
+    setPasswordCurrent("");
+    setLockError("");
+    setLockBusy(false);
+  }, [folderAccessRequest]);
 
   const closeMenus = () => {
     setOpenProjectMenuId(null);
@@ -2207,10 +2400,166 @@ function Dashboard({
     closeNameDialogs();
   };
 
-  const confirmFolderDelete = () => {
-    if (!folderPendingDelete) return;
+  const folderSessionUnlocked = (folderId: string) =>
+    unlockedFolderIds.includes(folderId) || sessionUnlockedRef.current.has(folderId);
+
+  const clearLockFields = () => {
+    setPasswordDraft("");
+    setPasswordConfirm("");
+    setPasswordCurrent("");
+    setLockError("");
+    setLockBusy(false);
+  };
+
+  const closeLockDialog = () => {
+    setLockDialog(null);
+    clearLockFields();
+    onFolderAccessRequestHandled();
+  };
+
+  const startFolderLockDialog = (folder: DashboardFolder, mode: LockDialogState["mode"]) => {
+    closeMenus();
+    onFolderAccessRequestHandled();
+    setLockDialog({ mode, folderId: folder.id });
+    clearLockFields();
+  };
+
+  const finishUnlock = (folderId: string, dialog: LockDialogState) => {
+    sessionUnlockedRef.current.add(folderId);
+    onUnlockFolderSession(folderId);
+    setLockDialog(null);
+    clearLockFields();
+    onFolderAccessRequestHandled();
+    if (dialog.opened) {
+      onApplyOpenedDocument(dialog.opened);
+      return;
+    }
+    if (dialog.projectId) {
+      onOpenProject(dialog.projectId);
+      return;
+    }
+    setOpenFolderId(folderId);
+  };
+
+  const submitLockDialog = async () => {
+    if (!lockDialog || lockBusy) return;
+    const folder = folders.find((item) => item.id === lockDialog.folderId);
+    if (!folder) {
+      closeLockDialog();
+      return;
+    }
+    setLockError("");
+    if (lockDialog.mode === "create") {
+      if (!passwordDraft.trim() || !passwordConfirm.trim()) {
+        setLockError("Enter a password.");
+        return;
+      }
+      if (passwordDraft !== passwordConfirm) {
+        setLockError("Those passwords do not match.");
+        return;
+      }
+      setLockBusy(true);
+      try {
+        const lock = await hashFolderPassword(passwordDraft);
+        onSetFolderPassword(folder.id, lock);
+        closeLockDialog();
+      } catch {
+        setLockError("Could not save that password.");
+        setLockBusy(false);
+      }
+      return;
+    }
+    if (lockDialog.mode === "unlock") {
+      if (!passwordDraft.trim()) {
+        setLockError("Enter a password.");
+        return;
+      }
+      if (!folder.passwordLock) {
+        finishUnlock(folder.id, lockDialog);
+        return;
+      }
+      setLockBusy(true);
+      try {
+        const matches = await verifyFolderPassword(passwordDraft, folder.passwordLock);
+        if (!matches) {
+          setLockError("Wrong password.");
+          setLockBusy(false);
+          return;
+        }
+        finishUnlock(folder.id, lockDialog);
+      } catch {
+        setLockError("Could not check that password.");
+        setLockBusy(false);
+      }
+      return;
+    }
+    if (!folder.passwordLock) {
+      closeLockDialog();
+      return;
+    }
+    if (!passwordCurrent.trim()) {
+      setLockError("Enter the current password.");
+      return;
+    }
+    setLockBusy(true);
+    try {
+      const matches = await verifyFolderPassword(passwordCurrent, folder.passwordLock);
+      if (!matches) {
+        setLockError("Wrong password.");
+        setLockBusy(false);
+        return;
+      }
+      if (lockDialog.mode === "remove") {
+        onSetFolderPassword(folder.id, null);
+        closeLockDialog();
+        return;
+      }
+      if (!passwordDraft.trim() || !passwordConfirm.trim()) {
+        setLockError("Enter a new password.");
+        setLockBusy(false);
+        return;
+      }
+      if (passwordDraft !== passwordConfirm) {
+        setLockError("Those passwords do not match.");
+        setLockBusy(false);
+        return;
+      }
+      const lock = await hashFolderPassword(passwordDraft);
+      onSetFolderPassword(folder.id, lock);
+      closeLockDialog();
+    } catch {
+      setLockError("Could not update that password.");
+      setLockBusy(false);
+    }
+  };
+
+  const confirmFolderDelete = async () => {
+    if (!folderPendingDelete || deleteLockBusy) return;
+    const needsPassword = Boolean(folderPendingDelete.passwordLock && !folderSessionUnlocked(folderPendingDelete.id));
+    if (needsPassword) {
+      if (!deletePasswordDraft.trim()) {
+        setDeleteLockError("Enter the password.");
+        return;
+      }
+      setDeleteLockBusy(true);
+      try {
+        const matches = await verifyFolderPassword(deletePasswordDraft, folderPendingDelete.passwordLock as FolderPasswordLock);
+        if (!matches) {
+          setDeleteLockError("Wrong password.");
+          setDeleteLockBusy(false);
+          return;
+        }
+      } catch {
+        setDeleteLockError("Could not check that password.");
+        setDeleteLockBusy(false);
+        return;
+      }
+    }
     onDeleteFolder(folderPendingDelete.id);
     setFolderPendingDeleteId(null);
+    setDeletePasswordDraft("");
+    setDeleteLockError("");
+    setDeleteLockBusy(false);
     if (openFolderId === folderPendingDelete.id) {
       setOpenFolderId(null);
     }
@@ -2218,6 +2567,11 @@ function Dashboard({
 
   const openFolderView = (folderId: string) => {
     closeMenus();
+    const folder = folders.find((item) => item.id === folderId);
+    if (folder?.passwordLock && !folderSessionUnlocked(folderId)) {
+      startFolderLockDialog(folder, "unlock");
+      return;
+    }
     setOpenFolderId(folderId);
   };
 
@@ -2433,6 +2787,15 @@ function Dashboard({
     if (suppressProjectOpenRef.current || draggingItemRef.current) {
       return;
     }
+    const project = projects.find((item) => item.id === projectId);
+    const folder = project?.folderId ? folders.find((item) => item.id === project.folderId) ?? null : null;
+    if (folder?.passwordLock && !folderSessionUnlocked(folder.id)) {
+      closeMenus();
+      onFolderAccessRequestHandled();
+      setLockDialog({ mode: "unlock", folderId: folder.id, projectId });
+      clearLockFields();
+      return;
+    }
     onOpenProject(projectId);
   };
 
@@ -2641,14 +3004,17 @@ function Dashboard({
 
   const renderFolderCard = (folder: DashboardFolder) => {
     const members = projectsInFolder(projects, folder.id);
-    const hero = resolveFolderHero(folder, projects);
+    const protectedFolder = folderKeepsProjectsInside(folder);
+    const sessionUnlocked = protectedFolder && folderSessionUnlocked(folder.id);
+    const showLocked = protectedFolder && !sessionUnlocked;
+    const hero = protectedFolder ? null : resolveFolderHero(folder, projects);
     const isDropTarget = dropTargetFolderId === folder.id;
     const isArrangeTarget = arrangeTargetId === folder.id;
 
     return (
       <article
         key={folder.id}
-        className={`folder-card${isDropTarget ? " drop-target" : ""}${isArrangeTarget ? " arrange-target" : ""}${draggingItemId === folder.id ? " is-dragging" : ""}`}
+        className={`folder-card${showLocked ? " is-locked" : ""}${sessionUnlocked ? " is-unlocked" : ""}${isDropTarget ? " drop-target" : ""}${isArrangeTarget ? " arrange-target" : ""}${draggingItemId === folder.id ? " is-dragging" : ""}`}
         draggable
         style={tileArrangeStyle(folder.id)}
         onDragStart={(event) => beginArrangeDrag(event, { id: folder.id, kind: "folder" })}
@@ -2658,6 +3024,7 @@ function Dashboard({
         <button
           className="folder-card-open"
           type="button"
+          aria-label={showLocked ? `${folder.name}, locked folder` : folder.name}
           onClick={() => {
             if (suppressProjectOpenRef.current) {
               return;
@@ -2667,7 +3034,11 @@ function Dashboard({
         >
           <span className="folder-card-tab" aria-hidden="true" />
           <span className="folder-preview-frame">
-            {hero ? (
+            {protectedFolder ? (
+              <span className="folder-lock-preview">
+                {showLocked ? <Lock size={28} strokeWidth={2.2} /> : <LockOpen size={28} strokeWidth={2.2} />}
+              </span>
+            ) : hero ? (
               <ProjectPreview
                 accent={hero.accent}
                 projectId={hero.id}
@@ -2681,10 +3052,18 @@ function Dashboard({
               </span>
             )}
           </span>
-          <span className="project-card-title">{folder.name}</span>
+          <span className="project-card-title">
+            {protectedFolder ? (
+              showLocked ? <Lock size={15} className="folder-title-lock" /> : <LockOpen size={15} className="folder-title-lock" />
+            ) : null}
+            {folder.name}
+          </span>
           <span className="project-card-meta">
-            {members.length} {members.length === 1 ? "project" : "projects"}
-            {hero ? ` · ${hero.name}` : ""}
+            {protectedFolder
+              ? showLocked
+                ? "Locked"
+                : "Unlocked"
+              : `${members.length} ${members.length === 1 ? "project" : "projects"}${hero ? ` · ${hero.name}` : ""}`}
           </span>
         </button>
         <button
@@ -2701,17 +3080,59 @@ function Dashboard({
           <EllipsisVertical size={19} strokeWidth={2.5} />
         </button>
         {openFolderMenuId === folder.id ? (
-          <div className="project-card-menu" role="menu" aria-label={`Options for ${folder.name}`}>
+          <div className="project-card-menu folder-card-menu" role="menu" aria-label={`Options for ${folder.name}`}>
             <button type="button" role="menuitem" onClick={() => startFolderRename(folder)}>
               <Pencil size={16} />
               <span>Rename</span>
             </button>
+            {protectedFolder ? (
+              sessionUnlocked ? (
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    closeMenus();
+                    sessionUnlockedRef.current.delete(folder.id);
+                    onLockFolderSession(folder.id);
+                    if (openFolderId === folder.id) setOpenFolderId(null);
+                  }}
+                >
+                  <Lock size={16} />
+                  <span>Lock folder</span>
+                </button>
+              ) : (
+                <button type="button" role="menuitem" onClick={() => startFolderLockDialog(folder, "unlock")}>
+                  <LockOpen size={16} />
+                  <span>Unlock…</span>
+                </button>
+              )
+            ) : (
+              <button type="button" role="menuitem" onClick={() => startFolderLockDialog(folder, "create")}>
+                <Lock size={16} />
+                <span>Lock with password…</span>
+              </button>
+            )}
+            {protectedFolder ? (
+              <button type="button" role="menuitem" onClick={() => startFolderLockDialog(folder, "change")}>
+                <KeyRound size={16} />
+                <span>Change password…</span>
+              </button>
+            ) : null}
+            {protectedFolder ? (
+              <button type="button" role="menuitem" onClick={() => startFolderLockDialog(folder, "remove")}>
+                <LockOpen size={16} />
+                <span>Remove password…</span>
+              </button>
+            ) : null}
             <button
               className="delete"
               type="button"
               role="menuitem"
               onClick={() => {
                 closeMenus();
+                setDeletePasswordDraft("");
+                setDeleteLockError("");
+                setDeleteLockBusy(false);
                 setFolderPendingDeleteId(folder.id);
               }}
             >
@@ -2790,10 +3211,12 @@ function Dashboard({
           {...(openFolder ? folderDropHandlers(openFolder.id) : {})}
         >
           {dashboardNotice ? (
-            <div className="dashboard-import-notice" role="status">
+            <div className="dashboard-import-notice visible" role="status">
               {dashboardNotice}
             </div>
-          ) : null}
+          ) : (
+            <div className="dashboard-import-notice" role="status" />
+          )}
 
           <div className="dashboard-section-header">
             <div>
@@ -2811,6 +3234,20 @@ function Dashboard({
                     <span>{openFolder.name}</span>
                   </nav>
                   <h1>{openFolder.name}</h1>
+                  {openFolder.passwordLock ? (
+                    <button
+                      className="folder-session-lock"
+                      type="button"
+                      onClick={() => {
+                        sessionUnlockedRef.current.delete(openFolder.id);
+                        onLockFolderSession(openFolder.id);
+                        closeFolderView();
+                      }}
+                    >
+                      <Lock size={16} strokeWidth={2.4} />
+                      <span>Lock folder</span>
+                    </button>
+                  ) : null}
                   <span>
                     {projectVisibleCount === 0
                       ? "0 projects"
@@ -2827,9 +3264,9 @@ function Dashboard({
                         : `${rootProjects.length} ${rootProjects.length === 1 ? "design" : "designs"}${
                             folderCount > 0 ? ` · ${folderCount} ${folderCount === 1 ? "folder" : "folders"}` : ""
                           }`
-                      : projects.length === 0 && folderCount === 0
+                      : rootProjects.length === 0 && folderCount === 0
                         ? "0 items"
-                        : `${projects.length} ${projects.length === 1 ? "design" : "designs"}${
+                        : `${rootProjects.length} ${rootProjects.length === 1 ? "design" : "designs"}${
                             folderCount > 0 ? ` · ${folderCount} ${folderCount === 1 ? "folder" : "folders"}` : ""
                           }`}
                   </span>
@@ -2972,25 +3409,78 @@ function Dashboard({
 
       {folderPendingDelete ? (
         <section className="dashboard-confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="delete-folder-title">
-          <div className="dashboard-confirm-dialog">
+          <form
+            className={`dashboard-confirm-dialog${folderPendingDelete.passwordLock && !folderSessionUnlocked(folderPendingDelete.id) ? " dashboard-rename-dialog" : ""}`}
+            onSubmit={(event) => {
+              event.preventDefault();
+              void confirmFolderDelete();
+            }}
+          >
             <header>
               <strong id="delete-folder-title">Delete folder?</strong>
-              <button type="button" aria-label="Cancel folder deletion" onClick={() => setFolderPendingDeleteId(null)}>
+              <button
+                type="button"
+                aria-label="Cancel folder deletion"
+                onClick={() => {
+                  setFolderPendingDeleteId(null);
+                  setDeletePasswordDraft("");
+                  setDeleteLockError("");
+                  setDeleteLockBusy(false);
+                }}
+              >
                 <X size={18} />
               </button>
             </header>
             <p>
               Delete <span>{folderPendingDelete.name}</span>? Projects inside return to home.
             </p>
+            {folderPendingDelete.passwordLock && !folderSessionUnlocked(folderPendingDelete.id) ? (
+              <label>
+                <span>Password</span>
+                <input
+                  autoFocus
+                  type="password"
+                  autoComplete="current-password"
+                  spellCheck={false}
+                  value={deletePasswordDraft}
+                  onChange={(event) => {
+                    setDeletePasswordDraft(event.currentTarget.value);
+                    setDeleteLockError("");
+                  }}
+                  aria-label="Folder password"
+                />
+              </label>
+            ) : null}
+            {deleteLockError ? (
+              <p className="dashboard-dialog-error" role="alert">
+                {deleteLockError}
+              </p>
+            ) : null}
             <div className="dashboard-confirm-actions">
-              <button className="dashboard-confirm-cancel" type="button" onClick={() => setFolderPendingDeleteId(null)}>
+              <button
+                className="dashboard-confirm-cancel"
+                type="button"
+                onClick={() => {
+                  setFolderPendingDeleteId(null);
+                  setDeletePasswordDraft("");
+                  setDeleteLockError("");
+                  setDeleteLockBusy(false);
+                }}
+              >
                 Cancel
               </button>
-              <button className="dashboard-confirm-delete" type="button" onClick={confirmFolderDelete}>
-                Delete folder
+              <button
+                className="dashboard-confirm-delete"
+                type="submit"
+                disabled={
+                  deleteLockBusy
+                  || (Boolean(folderPendingDelete.passwordLock && !folderSessionUnlocked(folderPendingDelete.id)) && !deletePasswordDraft.trim())
+                }
+              >
+                {deleteLockBusy ? "Checking…" : "Delete folder"}
               </button>
             </div>
-          </div>
+          </form>
         </section>
       ) : null}
 
@@ -3130,13 +3620,16 @@ function Dashboard({
                   key={folder.id}
                   type="button"
                   className={moveProject.folderId === folder.id ? "active" : ""}
+                  title={folder.passwordLock ? "Projects in this folder stay inside it" : undefined}
                   onClick={() => {
                     onMoveProjectToFolder(moveProject.id, folder.id);
                     setMoveProjectId(null);
-                    setOpenFolderId(folder.id);
+                    if (folder.passwordLock && !folderSessionUnlocked(folder.id)) return;
+                    openFolderView(folder.id);
                   }}
                 >
-                  {folder.name}
+                  {folder.passwordLock ? <Lock size={14} /> : null}
+                  <span>{folder.name}</span>
                 </button>
               ))}
             </div>
@@ -3147,6 +3640,148 @@ function Dashboard({
               </button>
             </div>
           </div>
+        </section>
+      ) : null}
+
+      {lockDialog ? (
+        <section className="dashboard-confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="folder-lock-title">
+          <form
+            className="dashboard-confirm-dialog dashboard-rename-dialog"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void submitLockDialog();
+            }}
+          >
+            <header>
+              <strong id="folder-lock-title">
+                {lockDialog.mode === "create"
+                  ? "Lock with password"
+                  : lockDialog.mode === "unlock"
+                    ? "Unlock folder"
+                    : lockDialog.mode === "change"
+                      ? "Change password"
+                      : "Remove password"}
+              </strong>
+              <button type="button" aria-label="Cancel folder password" onClick={closeLockDialog}>
+                <X size={18} />
+              </button>
+            </header>
+            <p>
+              {lockDialog.mode === "create" ? (
+                <>
+                  Projects in <span>{folders.find((folder) => folder.id === lockDialog.folderId)?.name}</span> will only appear inside this folder. This does not encrypt the file on disk.
+                </>
+              ) : lockDialog.mode === "unlock" ? (
+                <>
+                  Enter the password for <span>{folders.find((folder) => folder.id === lockDialog.folderId)?.name}</span>.
+                </>
+              ) : lockDialog.mode === "change" ? (
+                <>Enter the current password, then choose a new one.</>
+              ) : (
+                <>
+                  Enter the current password. Projects in <span>{folders.find((folder) => folder.id === lockDialog.folderId)?.name}</span> will show in the project lists again.
+                </>
+              )}
+            </p>
+            {lockDialog.mode === "change" || lockDialog.mode === "remove" ? (
+              <label>
+                <span>Current password</span>
+                <input
+                  autoFocus
+                  type="password"
+                  autoComplete="current-password"
+                  spellCheck={false}
+                  value={passwordCurrent}
+                  onChange={(event) => {
+                    setPasswordCurrent(event.currentTarget.value);
+                    setLockError("");
+                  }}
+                  aria-label="Current folder password"
+                />
+              </label>
+            ) : null}
+            {lockDialog.mode === "unlock" ? (
+              <label>
+                <span>Password</span>
+                <input
+                  autoFocus
+                  type="password"
+                  autoComplete="current-password"
+                  spellCheck={false}
+                  value={passwordDraft}
+                  onChange={(event) => {
+                    setPasswordDraft(event.currentTarget.value);
+                    setLockError("");
+                  }}
+                  aria-label="Folder password"
+                />
+              </label>
+            ) : null}
+            {lockDialog.mode === "create" || lockDialog.mode === "change" ? (
+              <>
+                <label>
+                  <span>{lockDialog.mode === "change" ? "New password" : "Password"}</span>
+                  <input
+                    autoFocus={lockDialog.mode === "create"}
+                    type="password"
+                    autoComplete="new-password"
+                    spellCheck={false}
+                    value={passwordDraft}
+                    onChange={(event) => {
+                      setPasswordDraft(event.currentTarget.value);
+                      setLockError("");
+                    }}
+                    aria-label={lockDialog.mode === "change" ? "New folder password" : "Folder password"}
+                  />
+                </label>
+                <label>
+                  <span>Confirm password</span>
+                  <input
+                    type="password"
+                    autoComplete="new-password"
+                    spellCheck={false}
+                    value={passwordConfirm}
+                    onChange={(event) => {
+                      setPasswordConfirm(event.currentTarget.value);
+                      setLockError("");
+                    }}
+                    aria-label="Confirm folder password"
+                  />
+                </label>
+              </>
+            ) : null}
+            {lockError ? (
+              <p className="dashboard-dialog-error" role="alert">
+                {lockError}
+              </p>
+            ) : null}
+            <div className="dashboard-confirm-actions">
+              <button className="dashboard-confirm-cancel" type="button" onClick={closeLockDialog}>
+                Cancel
+              </button>
+              <button
+                className={lockDialog.mode === "remove" ? "dashboard-confirm-delete" : "dashboard-confirm-save"}
+                type="submit"
+                disabled={
+                  lockBusy
+                  || (lockDialog.mode === "unlock" && !passwordDraft.trim())
+                  || (lockDialog.mode === "create" && (!passwordDraft.trim() || !passwordConfirm.trim()))
+                  || (lockDialog.mode === "change" && (!passwordCurrent.trim() || !passwordDraft.trim() || !passwordConfirm.trim()))
+                  || (lockDialog.mode === "remove" && !passwordCurrent.trim())
+                }
+              >
+                {lockBusy
+                  ? "Checking…"
+                  : lockDialog.mode === "create"
+                    ? "Lock folder"
+                    : lockDialog.mode === "unlock"
+                      ? "Unlock"
+                      : lockDialog.mode === "change"
+                        ? "Save"
+                        : "Remove password"}
+              </button>
+            </div>
+          </form>
         </section>
       ) : null}
 

@@ -2,6 +2,7 @@
 
 import { ChevronLeft, ChevronRight, Crosshair, Home, Minus, MousePointer2, Plus, Ruler, ScanEye, X } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type Dispatch, type DragEvent, type MutableRefObject, type PointerEvent as ReactPointerEvent, type ReactNode, type SetStateAction } from "react";
+import { flushSync } from "react-dom";
 import * as THREE from "three";
 import { Brush, Evaluator, HOLLOW_INTERSECTION } from "three-bvh-csg";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
@@ -150,6 +151,11 @@ const MIN_ELEVATION = -180;
 const MAX_ELEVATION = 220;
 const CAMERA_MIN_TARGET_Y = -70;
 const CAMERA_MAX_TARGET_Y = 120;
+/** Quiet frames required before measurement overlays return after a camera move.
+ * One still frame is enough: a later update that does not move the camera is ignored. */
+const CAMERA_OVERLAY_SETTLE_FRAMES = 1;
+/** Pose change below this is a trailing damping tick, not a new pan. distance² / quaternion epsilon. */
+const CAMERA_OVERLAY_TRAIL_EPS = 1e-4;
 const SHAPE_KINDS = new Set<ShapeAsset["kind"]>([
   "box",
   "cylinder",
@@ -257,10 +263,13 @@ export type WorkplaneViewportProps = {
   onDeactivatePlacementRuler?: () => void;
   placementRulerCard?: ReactNode;
   onInteractionActiveChange?: (active: boolean) => void;
+  /** Fires after the first mesh build, so a project-open wheel can leave the screen. */
+  onSceneReady?: () => void;
   onEditSketch?: () => void;
   onEditSketchDimension?: (dimensionId: string, value: number) => void;
   canSeparateParts?: boolean;
   onSeparateParts?: () => void;
+  onReduceTriangles?: (keepFraction: number) => void;
   activeFeatureId?: string | null;
   onSelectFeature?: (featureId: string | null) => void;
   onSuppressFeature?: (featureId: string, suppressed: boolean) => void;
@@ -282,6 +291,11 @@ export type WorkplaneViewportProps = {
   rotationEditApiRef?: MutableRefObject<{ dismiss: () => void } | null>;
   onDropToWorkplane?: () => void;
   onSnapSelection?: () => void;
+  faceSnapActive?: boolean;
+  /** The side already chosen. Stays highlighted until the shapes move. */
+  faceSnapSource?: { shapeId: string; point: [number, number, number]; normal: [number, number, number] } | null;
+  onFaceSnapPick?: (pick: { shapeId: string; point: [number, number, number]; normal: [number, number, number] }) => void;
+  faceSnapMotionRef?: MutableRefObject<((shapeId: string, delta: { x: number; y: number; z: number }, done: () => void) => void) | null>;
   /** Floated in the shape-inspector column so width/alignment stay matched. */
   inspectorDock?: ReactNode;
   /** Top of the inspector column (fillet / chamfer panel). */
@@ -334,6 +348,12 @@ export type ThreeState = {
   animationId: number;
   needsRender: boolean;
   wasCameraMoving: boolean;
+  cameraStillFrames: number;
+  /** True after measurements were projected from a camera that had finished moving. */
+  cameraOverlayHold: boolean;
+  cameraHoldPosition: THREE.Vector3;
+  cameraHoldTarget: THREE.Vector3;
+  cameraHoldQuaternion: THREE.Quaternion;
   lastOverlaySync: number;
   lastViewCubeSync: number;
   rotationHandleSides: RotationHandleSides | null;
@@ -2210,10 +2230,12 @@ export function WorkplaneViewport({
   onDeactivatePlacementRuler,
   placementRulerCard,
   onInteractionActiveChange,
+  onSceneReady,
   onEditSketch,
   onEditSketchDimension,
   canSeparateParts = false,
   onSeparateParts,
+  onReduceTriangles,
   activeFeatureId = null,
   onSelectFeature,
   onSuppressFeature,
@@ -2233,6 +2255,10 @@ export function WorkplaneViewport({
   rotationEditApiRef,
   onDropToWorkplane,
   onSnapSelection,
+  faceSnapActive = false,
+  faceSnapSource = null,
+  onFaceSnapPick,
+  faceSnapMotionRef,
   inspectorDock,
   inspectorDockTop,
 }: WorkplaneViewportProps) {
@@ -2273,7 +2299,43 @@ export function WorkplaneViewport({
   const [rulerOverlay, setRulerOverlay] = useState<RulerOverlayState | null>(null);
   const hostRef = useRef<HTMLDivElement | null>(null);
   const threeRef = useRef<ThreeState | null>(null);
+  const onSceneReadyRef = useRef(onSceneReady);
+  onSceneReadyRef.current = onSceneReady;
+  const orbitingRef = useRef(false);
+  const cameraOverlaysHiddenRef = useRef(false);
+  const [measurementsConcealed, setMeasurementsConcealed] = useState(false);
+  const syncMeasurementsRef = useRef<(() => void) | null>(null);
+  const concealMeasurements = useCallback(() => {
+    if (cameraOverlaysHiddenRef.current) return;
+    cameraOverlaysHiddenRef.current = true;
+    flushSync(() => setMeasurementsConcealed(true));
+  }, []);
+  const revealMeasurements = useCallback(() => {
+    const state = threeRef.current;
+    if (!state || !cameraOverlaysHiddenRef.current) return;
+    stopCameraCoast(state.controls);
+    state.camera.updateMatrixWorld();
+    cameraOverlaysHiddenRef.current = false;
+    state.wasCameraMoving = false;
+    state.cameraStillFrames = 0;
+    state.cameraOverlayHold = true;
+    rememberCameraHoldPose(state);
+    flushSync(() => {
+      syncMeasurementsRef.current?.();
+      setMeasurementsConcealed(false);
+    });
+    state.needsRender = true;
+  }, []);
+  const busyLabelRef = useRef<string | null>(null);
+  const busyUntilRef = useRef(0);
+  const [busyLabel, setBusyLabel] = useState<string | null>(null);
   const shapesRef = useRef(shapes);
+  const faceSnapActiveRef = useRef(false);
+  faceSnapActiveRef.current = faceSnapActive;
+  const onFaceSnapPickRef = useRef(onFaceSnapPick);
+  onFaceSnapPickRef.current = onFaceSnapPick;
+  const faceSnapSourceRef = useRef(faceSnapSource);
+  faceSnapSourceRef.current = faceSnapSource;
   const alignReferenceShapesRef = useRef(alignReferenceShapes);
   const mirrorReferenceShapesRef = useRef(mirrorReferenceShapes);
   const selectedIdsRef = useRef(selectedIds);
@@ -2891,13 +2953,40 @@ export function WorkplaneViewport({
     }
     rebuildShapes(state, shapesRef.current, renderSelectionIds());
     markShadowsDirty(state);
+    onSceneReadyRef.current?.();
+
+    const onCameraPointerDown = (event: PointerEvent) => {
+      const cameraDrag = event.button === 2 || event.button === 1 || (event.button === 0 && (event.ctrlKey || event.metaKey));
+      if (!cameraDrag) return;
+      concealMeasurements();
+      if (importedTriangleTotal(shapesRef.current) <= HEAVY_SCENE_TRIANGLES) return;
+      orbitingRef.current = true;
+      busyUntilRef.current = performance.now() + 4000;
+      if (busyLabelRef.current !== "Moving view…") {
+        busyLabelRef.current = "Moving view…";
+        setBusyLabel("Moving view…");
+      }
+    };
+    const onCameraPointerUp = (event: PointerEvent) => {
+      if (event.button !== 2 && event.button !== 1 && event.button !== 0) return;
+      revealMeasurements();
+      orbitingRef.current = false;
+      busyUntilRef.current = performance.now() + 400;
+    };
+    state.renderer.domElement.addEventListener("pointerdown", onCameraPointerDown);
+    state.renderer.domElement.addEventListener("pointerup", onCameraPointerUp);
 
     const animate = () => {
       state.animationId = window.requestAnimationFrame(animate);
       const now = performance.now();
       const controlsChanged = state.controls.update();
-      const cameraSettled = state.wasCameraMoving && !controlsChanged;
-      if (!controlsChanged && !state.needsRender && !cameraSettled) {
+      // Stay in the loop for the still frame that republishes the overlays.
+      // That frame has no controls change, but the camera move has not been cleared yet.
+      if (!controlsChanged && !state.needsRender && !state.wasCameraMoving) {
+        if (busyLabelRef.current && !orbitingRef.current && now > busyUntilRef.current) {
+          busyLabelRef.current = null;
+          setBusyLabel(null);
+        }
         return;
       }
       constrainCamera(state, workspaceRef.current);
@@ -2909,11 +2998,23 @@ export function WorkplaneViewport({
       if (viewNudgeAxesRef) {
         viewNudgeAxesRef.current = computeViewNudgeAxes(state.camera);
       }
+      // controls.update() stays true through damping and can flip quiet/changed at the end.
+      // Hide measurements for that whole motion. Project them once on the first still frame.
+      // A later tick that does not move the pose must not null them or project them again.
+      const trailingCameraTick = controlsChanged && state.cameraOverlayHold && !cameraHoldPoseMoved(state);
+      if (controlsChanged && !trailingCameraTick) {
+        state.cameraStillFrames = 0;
+        state.wasCameraMoving = true;
+        state.cameraOverlayHold = false;
+      } else if (!controlsChanged && state.wasCameraMoving) {
+        state.cameraStillFrames += 1;
+      }
+      const cameraSettled = state.wasCameraMoving && state.cameraStillFrames >= CAMERA_OVERLAY_SETTLE_FRAMES;
       if (now - state.lastViewCubeSync > 48 || cameraSettled || state.needsRender) {
         syncViewCube(state, viewCubeRef.current);
         state.lastViewCubeSync = now;
       }
-      if (controlsChanged || cameraSettled || state.needsRender || now - state.lastOverlaySync > 96) {
+      const syncMeasurementOverlays = () => {
         const previewShapes = previewShapesForDrag(shapesRef.current, dragRef.current);
         syncTransformOverlay(
           state,
@@ -2936,9 +3037,23 @@ export function WorkplaneViewport({
         );
         syncRulerOverlay(state, rulerModelRef.current, rulerOverlayRef, setRulerOverlay, workspaceRef.current);
         state.lastOverlaySync = now;
+      };
+      syncMeasurementsRef.current = syncMeasurementOverlays;
+      if (!cameraOverlaysHiddenRef.current && !trailingCameraTick && (cameraSettled || state.needsRender || now - state.lastOverlaySync > 96)) {
+        if (cameraSettled) {
+          state.wasCameraMoving = false;
+          state.cameraStillFrames = 0;
+          state.cameraOverlayHold = true;
+          rememberCameraHoldPose(state);
+        }
+        syncMeasurementOverlays();
       }
       const renderStart = performance.now();
-      state.renderer.render(state.scene, state.camera);
+      try {
+        state.renderer.render(state.scene, state.camera);
+      } catch (error) {
+        console.error("Viewport render failed", error);
+      }
       const frameMs = performance.now() - renderStart;
       const perf = perfRef.current;
       perf.frameMs = frameMs;
@@ -2950,8 +3065,19 @@ export function WorkplaneViewport({
         perf.lastSample = now;
         perf.maxFrameMs = frameMs;
       }
-      state.wasCameraMoving = controlsChanged;
       state.needsRender = false;
+      const heavyScene = importedTriangleTotal(shapesRef.current) > HEAVY_SCENE_TRIANGLES;
+      if (heavyScene && (orbitingRef.current || frameMs > 90)) {
+        busyUntilRef.current = Math.max(busyUntilRef.current, now + 700);
+        const nextLabel = orbitingRef.current ? "Moving view…" : "Working…";
+        if (busyLabelRef.current !== nextLabel) {
+          busyLabelRef.current = nextLabel;
+          setBusyLabel(nextLabel);
+        }
+      } else if (busyLabelRef.current && !orbitingRef.current && now > busyUntilRef.current) {
+        busyLabelRef.current = null;
+        setBusyLabel(null);
+      }
     };
 
     animate();
@@ -2973,6 +3099,8 @@ export function WorkplaneViewport({
       cancelScheduledCutPreviewOverlays();
       resizeObserver.disconnect();
       window.removeEventListener("resize", state.resize);
+      state.renderer.domElement.removeEventListener("pointerdown", onCameraPointerDown);
+      state.renderer.domElement.removeEventListener("pointerup", onCameraPointerUp);
       state.disposeInteractionListeners();
       state.controls.dispose();
       disposeChildren(state.workplaneLayer);
@@ -3024,6 +3152,7 @@ export function WorkplaneViewport({
     }
 
     const rect = state.renderer.domElement.getBoundingClientRect();
+    state.camera.updateMatrixWorld();
     state.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     state.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     state.raycaster.setFromCamera(state.pointer, state.camera);
@@ -3044,10 +3173,9 @@ export function WorkplaneViewport({
     }
 
     const step = snapStep(snapRef.current);
-    const bounds = workspaceRef.current;
     return {
-      x: clamp(snapValue(hit.x, step), -bounds.width / 2 + 6, bounds.width / 2 - 6),
-      z: clamp(snapValue(hit.z, step), -bounds.depth / 2 + 6, bounds.depth / 2 - 6),
+      x: snapValue(hit.x, step),
+      z: snapValue(hit.z, step),
     };
   }, [toRawPlanePoint]);
   const toPlanePoint = useCallback((clientX: number, clientY: number) => toPlanePointAtY(clientX, clientY, 0), [toPlanePointAtY]);
@@ -3595,8 +3723,8 @@ export function WorkplaneViewport({
         const patch: Partial<WorkplaneShape> = rotationPatchFromQuaternion(nextQuaternion);
         if (transform.items.length > 1) {
           const nextCenter = pivot.clone().add(item.startCenter.clone().sub(pivot).applyQuaternion(rotationDelta));
-          patch.x = snapPositionValue(nextCenter.x, step, -workspaceRef.current.width / 2 + 6, workspaceRef.current.width / 2 - 6);
-          patch.z = snapPositionValue(nextCenter.z, step, -workspaceRef.current.depth / 2 + 6, workspaceRef.current.depth / 2 - 6);
+          patch.x = snapValue(nextCenter.x, step);
+          patch.z = snapValue(nextCenter.z, step);
           patch.elevation = snapPositionValue(nextCenter.y - item.startShape.height / 2, step, MIN_ELEVATION, MAX_ELEVATION);
         }
         onUpdateShape(item.id, patch);
@@ -3896,7 +4024,12 @@ export function WorkplaneViewport({
     bakePendingRotations();
   }, [bakePendingRotations]);
 
+  const pickCacheRef = useRef<{ x: number; y: number; hits: string[] } | null>(null);
   const pickShapesAt = useCallback((clientX: number, clientY: number) => {
+    const cached = pickCacheRef.current;
+    if (cached && cached.x === clientX && cached.y === clientY) {
+      return cached.hits;
+    }
     const state = threeRef.current;
     if (!state) {
       return [] as string[];
@@ -3909,6 +4042,7 @@ export function WorkplaneViewport({
 
     const hits: string[] = [];
     const seen = new Set<string>();
+    try {
     const intersections = state.raycaster.intersectObjects(state.shapeLayer.children, true);
     // Outline lines use a world-space threshold (1.15 mm). On a tight assembly that tube
     // sits in front of the neighboring solid, so the first hit was the outline, not the part
@@ -3929,6 +4063,7 @@ export function WorkplaneViewport({
       hits.push(id);
     });
     if (hits.length > 0) {
+      pickCacheRef.current = { x: clientX, y: clientY, hits };
       return hits;
     }
 
@@ -3949,13 +4084,15 @@ export function WorkplaneViewport({
       }
     });
     nearby.sort((a, b) => a.distance - b.distance);
-    if (nearby.length === 0) {
+    const missed = nearby.length === 0 || (nearby.length > 1 && nearby[1].distance - nearby[0].distance < 8)
+      ? []
+      : [nearby[0].id];
+    pickCacheRef.current = { x: clientX, y: clientY, hits: missed };
+    return missed;
+    } catch (error) {
+      console.error("Shape pick failed", error);
       return [];
     }
-    if (nearby.length > 1 && nearby[1].distance - nearby[0].distance < 8) {
-      return [];
-    }
-    return [nearby[0].id];
   }, []);
 
   const pickShape = useCallback((clientX: number, clientY: number) => pickShapesAt(clientX, clientY)[0] ?? null, [pickShapesAt]);
@@ -4166,8 +4303,124 @@ export function WorkplaneViewport({
     };
   }, []);
 
+  const pickShapeFaceAt = useCallback((clientX: number, clientY: number) => {
+    const state = threeRef.current;
+    if (!state) return null;
+    const rect = state.renderer.domElement.getBoundingClientRect();
+    state.camera.updateMatrixWorld();
+    state.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+    state.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+    state.raycaster.setFromCamera(state.pointer, state.camera);
+    const hits = state.raycaster.intersectObjects(state.shapeLayer.children, true);
+    for (const hit of hits) {
+      if (!(hit.object instanceof THREE.Mesh)) continue;
+      let shapeId: string | null = null;
+      let node: THREE.Object3D | null = hit.object;
+      while (node) {
+        const id = node.userData.shapeId;
+        if (typeof id === "string" && shapesRef.current.some((shape) => shape.id === id)) shapeId = id;
+        node = node.parent;
+      }
+      if (!shapeId) continue;
+      const shape = shapesRef.current.find((item) => item.id === shapeId);
+      if (!shape) continue;
+      if (hit.face) {
+        const normal = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);
+        const snapped = axisNormal(normal);
+        if (!snapped) continue;
+        return {
+          shapeId,
+          point: [hit.point.x, hit.point.y, hit.point.z] as [number, number, number],
+          normal: snapped,
+        };
+      }
+      const box = snapAabbFromShape(shape);
+      const sides = [
+        { normal: [1, 0, 0] as [number, number, number], distance: Math.abs(hit.point.x - box.maxX) },
+        { normal: [-1, 0, 0] as [number, number, number], distance: Math.abs(hit.point.x - box.minX) },
+        { normal: [0, 1, 0] as [number, number, number], distance: Math.abs(hit.point.y - box.maxY) },
+        { normal: [0, -1, 0] as [number, number, number], distance: Math.abs(hit.point.y - box.minY) },
+        { normal: [0, 0, 1] as [number, number, number], distance: Math.abs(hit.point.z - box.maxZ) },
+        { normal: [0, 0, -1] as [number, number, number], distance: Math.abs(hit.point.z - box.minZ) },
+      ].sort((a, b) => a.distance - b.distance);
+      return {
+        shapeId,
+        point: [hit.point.x, hit.point.y, hit.point.z] as [number, number, number],
+        normal: sides[0].normal,
+      };
+    }
+    return null;
+  }, []);
+
+  const updateFaceSnapHover = useCallback((clientX: number, clientY: number) => {
+    const state = threeRef.current;
+    if (!state) return;
+    const face = pickShapeFaceAt(clientX, clientY);
+    const locked = faceSnapSourceRef.current;
+    const sameSide = Boolean(face && locked && face.shapeId === locked.shapeId && face.normal.every((value, index) => value === locked.normal[index]));
+    const shape = face && !sameSide ? shapesRef.current.find((item) => item.id === face.shapeId) ?? null : null;
+    syncFaceSnapHighlight(state, FACE_SNAP_HOVER_NAME, shape, sameSide ? null : face, 0.28);
+  }, [pickShapeFaceAt]);
+
+  const clearFaceSnapHover = useCallback(() => {
+    const state = threeRef.current;
+    if (!state) return;
+    syncFaceSnapHighlight(state, FACE_SNAP_HOVER_NAME, null, null, 0);
+  }, []);
+
+  useEffect(() => {
+    const state = threeRef.current;
+    if (!state) return;
+    if (!faceSnapActive) {
+      syncFaceSnapHighlight(state, FACE_SNAP_HOVER_NAME, null, null, 0);
+      syncFaceSnapHighlight(state, FACE_SNAP_LOCK_NAME, null, null, 0);
+      state.needsRender = true;
+      return;
+    }
+    const source = faceSnapSource;
+    const shape = source ? shapesRef.current.find((item) => item.id === source.shapeId) ?? null : null;
+    syncFaceSnapHighlight(state, FACE_SNAP_LOCK_NAME, shape, source, 0.46);
+    state.needsRender = true;
+  }, [faceSnapActive, faceSnapSource]);
+
+  useEffect(() => {
+    if (!faceSnapMotionRef) return;
+    faceSnapMotionRef.current = (shapeId, delta, done) => {
+      const state = threeRef.current;
+      const object = state ? findShapeObject(state, shapeId) : null;
+      const shape = shapesRef.current.find((item) => item.id === shapeId);
+      if (!state || !object || !shape) {
+        done();
+        return;
+      }
+      syncFaceSnapHighlight(state, FACE_SNAP_HOVER_NAME, null, null, 0);
+      syncFaceSnapHighlight(state, FACE_SNAP_LOCK_NAME, null, null, 0);
+      const startX = shape.x;
+      const startZ = shape.z;
+      const startElevation = shape.elevation ?? 0;
+      const started = performance.now();
+      const tick = (now: number) => {
+        const t = Math.min(1, (now - started) / 150);
+        const eased = 1 - (1 - t) ** 3;
+        applyShapePose(object, {
+          ...shape,
+          x: startX + delta.x * eased,
+          z: startZ + delta.z * eased,
+          elevation: startElevation + delta.y * eased,
+        });
+        state.needsRender = true;
+        if (t < 1) requestAnimationFrame(tick);
+        else done();
+      };
+      requestAnimationFrame(tick);
+    };
+    return () => {
+      faceSnapMotionRef.current = null;
+    };
+  }, [faceSnapMotionRef]);
+
   const handlePointerDown = useCallback(
-    (event: ReactPointerEvent<HTMLDivElement>) => {
+    async (event: ReactPointerEvent<HTMLDivElement>) => {
       const state = threeRef.current;
       if (!state) {
         return;
@@ -4175,7 +4428,24 @@ export function WorkplaneViewport({
       if (event.button !== 0 || event.ctrlKey || event.metaKey) {
         return;
       }
-      const rect = state.renderer.domElement.getBoundingClientRect();
+      const host = event.currentTarget;
+      const heavyPick = importedTriangleTotal(shapesRef.current) > HEAVY_SCENE_TRIANGLES;
+      if (heavyPick) {
+        busyLabelRef.current = "Selecting…";
+        busyUntilRef.current = performance.now() + 4000;
+        flushSync(() => setBusyLabel("Selecting…"));
+        await afterNextPaint();
+        if (!threeRef.current) return;
+      }
+      pickCacheRef.current = null;
+      if (faceSnapActiveRef.current) {
+        event.preventDefault();
+        const face = pickShapeFaceAt(event.clientX, event.clientY);
+        if (face) onFaceSnapPickRef.current?.(face);
+        return;
+      }
+      const rect = (threeRef.current ?? state).renderer.domElement.getBoundingClientRect();
+      try {
 
       // Alt+click picks a CSG feature inside a grouped body (inspector Features list).
       if (event.altKey && onSelectFeature) {
@@ -4290,7 +4560,7 @@ export function WorkplaneViewport({
         const rotationStartVector = rotationStartPoint ? rotationStartPoint.sub(rotationPlaneCenter) : undefined;
         rememberResizeAnchor(handle.id, handle.kind, resizeHandleKey);
         event.preventDefault();
-        event.currentTarget.setPointerCapture(event.pointerId);
+        host.setPointerCapture(event.pointerId);
         setEditingRotation(null);
         setPinnedMeasureKey(measureKeyForHandle(handle.kind, handle.handleKey, transformOverlayRef.current));
         if (handle.kind === "height") {
@@ -4373,7 +4643,8 @@ export function WorkplaneViewport({
         event.preventDefault();
         setEditingRotation(null);
         setActiveRotationWheel(false);
-        event.currentTarget.setPointerCapture(event.pointerId);
+        host.setPointerCapture(event.pointerId);
+        // A still click clears selection on release. The box is drawn only after a real drag.
         marqueeRef.current = {
           pointerId: event.pointerId,
           startX,
@@ -4383,7 +4654,6 @@ export function WorkplaneViewport({
           additive,
           hasMoved: false,
         };
-        setMarqueeFromState(marqueeRef.current);
         state.controls.enabled = false;
         onInteractionActiveChange?.(true);
         return;
@@ -4419,7 +4689,7 @@ export function WorkplaneViewport({
       }
       setEditingRotation(null);
       setActiveRotationWheel(false);
-      event.currentTarget.setPointerCapture(event.pointerId);
+      host.setPointerCapture(event.pointerId);
       const dragIds = alreadySelected && selectedIdsSnapshot.length > 1 ? selectedIdsSnapshot : [id];
       const items = dragIds
         .map((dragId) => {
@@ -4458,6 +4728,13 @@ export function WorkplaneViewport({
       state.needsRender = true;
       state.controls.enabled = false;
       onInteractionActiveChange?.(true);
+      } finally {
+        if (heavyPick) {
+          busyLabelRef.current = null;
+          busyUntilRef.current = 0;
+          setBusyLabel(null);
+        }
+      }
     },
     [
       modifierActive,
@@ -4478,7 +4755,6 @@ export function WorkplaneViewport({
       resolveRulerCandidate,
       tryCycleStackedSelection,
       selectRulerCandidate,
-      setMarqueeFromState,
       toPlanePoint,
       toPlanePointAtY,
       toRawPlanePoint,
@@ -4487,6 +4763,9 @@ export function WorkplaneViewport({
 
   const handlePointerMove = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
+      if (faceSnapActiveRef.current) {
+        updateFaceSnapHover(event.clientX, event.clientY);
+      }
       if (modifierActiveRef.current) {
         updateModifierEdgeHover(event.clientX, event.clientY);
         return;
@@ -4514,6 +4793,9 @@ export function WorkplaneViewport({
 
       const marquee = marqueeRef.current;
       if (marquee) {
+        if (event.pointerId !== marquee.pointerId) {
+          return;
+        }
         const state = threeRef.current;
         if (!state) {
           return;
@@ -4522,7 +4804,9 @@ export function WorkplaneViewport({
         marquee.currentX = event.clientX - rect.left;
         marquee.currentY = event.clientY - rect.top;
         marquee.hasMoved = marquee.hasMoved || Math.hypot(marquee.currentX - marquee.startX, marquee.currentY - marquee.startY) > 5;
-        setMarqueeFromState(marquee);
+        if (marquee.hasMoved) {
+          setMarqueeFromState(marquee);
+        }
         return;
       }
 
@@ -4536,8 +4820,8 @@ export function WorkplaneViewport({
         return;
       }
 
-      const primaryNextX = clamp(point.x + drag.offsetX, -workspaceRef.current.width / 2 + 6, workspaceRef.current.width / 2 - 6);
-      const primaryNextZ = clamp(point.z + drag.offsetZ, -workspaceRef.current.depth / 2 + 6, workspaceRef.current.depth / 2 - 6);
+      const primaryNextX = point.x + drag.offsetX;
+      const primaryNextZ = point.z + drag.offsetZ;
       let deltaX = primaryNextX - drag.primaryStartX;
       let deltaZ = primaryNextZ - drag.primaryStartZ;
 
@@ -4588,8 +4872,8 @@ export function WorkplaneViewport({
       }
 
       drag.items.forEach((item) => {
-        item.nextX = clamp(item.startX + deltaX, -workspaceRef.current.width / 2 + 6, workspaceRef.current.width / 2 - 6);
-        item.nextZ = clamp(item.startZ + deltaZ, -workspaceRef.current.depth / 2 + 6, workspaceRef.current.depth / 2 - 6);
+        item.nextX = item.startX + deltaX;
+        item.nextZ = item.startZ + deltaZ;
         if (threeRef.current) applyDragItemPreview(threeRef.current, item);
       });
       if (threeRef.current) {
@@ -4615,15 +4899,32 @@ export function WorkplaneViewport({
   );
 
   const handlePointerLeave = useCallback(() => {
+    clearFaceSnapHover();
     if (modifierActiveRef.current) clearModifierEdgeHover();
     if (sketchFacePickModeRef.current) clearSketchFaceHover();
   }, [clearModifierEdgeHover, clearSketchFaceHover]);
 
-  const handleLostPointerCapture = useCallback(() => {
+  const handleLostPointerCapture = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    const marquee = marqueeRef.current;
+    if (marquee) {
+      let hostStillCapturing = false;
+      try {
+        hostStillCapturing = event.currentTarget.hasPointerCapture(marquee.pointerId);
+      } catch {
+        hostStillCapturing = false;
+      }
+      // OrbitControls releases the canvas while the workplane host still owns the gesture.
+      if (hostStillCapturing) {
+        return;
+      }
+      if (!marquee.hasMoved && !marquee.additive) {
+        onSelectShape(null);
+      }
+    }
     if (transformRef.current || dragRef.current || marqueeRef.current) {
       cancelActiveInteraction();
     }
-  }, [cancelActiveInteraction]);
+  }, [cancelActiveInteraction, onSelectShape]);
 
   const finishDrag = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -4665,9 +4966,8 @@ export function WorkplaneViewport({
 
       const marquee = marqueeRef.current;
       if (marquee) {
-        if (event.currentTarget.hasPointerCapture(marquee.pointerId)) {
-          event.currentTarget.releasePointerCapture(marquee.pointerId);
-        }
+        // Apply click vs drag before release. Releasing capture fires lostpointercapture
+        // immediately, and that handler used to drop the gesture before selection updated.
         marqueeRef.current = null;
         setMarqueeFromState(null);
         if (marquee.hasMoved) {
@@ -4691,6 +4991,13 @@ export function WorkplaneViewport({
           }
         } else if (!marquee.additive) {
           onSelectShape(null);
+        }
+        try {
+          if (event.currentTarget.hasPointerCapture(marquee.pointerId)) {
+            event.currentTarget.releasePointerCapture(marquee.pointerId);
+          }
+        } catch {
+          // Pointer capture can already be gone when the button is released.
         }
         if (state) {
           state.controls.enabled = true;
@@ -4878,16 +5185,16 @@ export function WorkplaneViewport({
       if (Math.hypot(deltaX, deltaY) < 4) {
         return;
       }
-      // Capture only after the pointer actually moves so face clicks still work.
       drag.dragged = true;
       drag.capturer = event.currentTarget;
       event.currentTarget.setPointerCapture(event.pointerId);
+      concealMeasurements();
     }
     drag.lastX = event.clientX;
     drag.lastY = event.clientY;
     orbitCameraByPointerDelta(state, deltaX, deltaY);
     syncViewCube(state, viewCubeRef.current);
-  }, []);
+  }, [concealMeasurements]);
 
   const onViewCubePointerUp = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
     const drag = viewCubeDragRef.current;
@@ -4901,9 +5208,15 @@ export function WorkplaneViewport({
     const wasDrag = drag.dragged;
     viewCubeDragRef.current = null;
     if (!wasDrag && face) {
+      concealMeasurements();
       applyViewCubeFace(face);
+      window.requestAnimationFrame(() => revealMeasurements());
+      return;
     }
-  }, [applyViewCubeFace]);
+    if (wasDrag) {
+      revealMeasurements();
+    }
+  }, [applyViewCubeFace, concealMeasurements, revealMeasurements]);
 
   const zoomCamera = useCallback((scale: number) => {
     const state = threeRef.current;
@@ -5310,6 +5623,12 @@ export function WorkplaneViewport({
             onPointerLeave={handlePointerLeave}
             onLostPointerCapture={handleLostPointerCapture}
           />
+          {busyLabel ? (
+            <div className="viewport-busy" role="status" aria-live="polite">
+              <span className="model-loading-wheel viewport-busy-wheel" aria-hidden="true" />
+              <span>{busyLabel}</span>
+            </div>
+          ) : null}
           <WorkplaneEmptyCoach
             visible={
               !shapes.some((shape) => !shape.hidden)
@@ -5355,6 +5674,7 @@ export function WorkplaneViewport({
               {objectSnapGuide.kind === "edge" ? "Edge" : objectSnapGuide.kind === "mid" ? "Mid" : "Face"}
             </div>
           ) : null}
+          <div className={`measurement-fade${measurementsConcealed ? " is-concealed" : ""}`}>
           {transformOverlay && !sketchFacePickMode && !alignMode && !mirrorMode && !rulerMode && !rulerDeleteMode && !rulerMoveMode && !placementRulerMode && !modifierActive ? (
             <TransformOverlay
               box={transformOverlay}
@@ -5410,6 +5730,7 @@ export function WorkplaneViewport({
               onSegmentPointerDown={handleRulerSegmentPointerDown}
             />
           ) : null}
+          </div>
         </div>
         {placementRulerCard ? <div className="placement-ruler-canvas-card">{placementRulerCard}</div> : null}
       </section>
@@ -5436,10 +5757,10 @@ export function WorkplaneViewport({
         ) : null}
         {onSnapSelection ? (
           <PeakTipButton
-            className={`workplane-viewport-bar-snap ${selectedIds.length > 0 ? "" : "disabled"}`}
+            className={`workplane-viewport-bar-snap ${faceSnapActive ? "active" : ""}`}
             label="Snap"
             description={TOOL_DESCRIPTIONS.snap}
-            disabled={selectedIds.length === 0}
+            aria-pressed={faceSnapActive}
             onClick={onSnapSelection}
           >
             <ToolbarSnapGridIcon />
@@ -5488,6 +5809,7 @@ export function WorkplaneViewport({
             onEditSketchDimension={onEditSketchDimension}
             canSeparateParts={canSeparateParts}
             onSeparateParts={onSeparateParts}
+            onReduceTriangles={onReduceTriangles}
             activeFeatureId={activeFeatureId}
             onSelectFeature={onSelectFeature}
             onSuppressFeature={onSuppressFeature}
@@ -5514,6 +5836,10 @@ function resolveHostSize(host: HTMLElement) {
 function createThreeScene(host: HTMLDivElement): ThreeState {
   const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance", preserveDrawingBuffer: shouldPreserveDrawingBufferForLocalAutomation() });
   renderer.setPixelRatio(resolvePixelRatio(window.devicePixelRatio || 1));
+  renderer.shadowMap.autoUpdate = false;
+  renderer.domElement.addEventListener("webglcontextlost", (event) => {
+    event.preventDefault();
+  });
   const initialSize = resolveHostSize(host);
   // Keep CSS (width/height: 100%) in charge of layout; only sync the drawing buffer.
   // updateStyle=true can lock the canvas to a 0-height first paint and leave the
@@ -5531,7 +5857,9 @@ function createThreeScene(host: HTMLDivElement): ThreeState {
   const camera = new THREE.PerspectiveCamera(38, initialSize.width / initialSize.height, 0.1, 6000);
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
-  controls.dampingFactor = 0.08;
+  // Higher than 0.08 so the glide dies in fewer frames. controls.update() then
+  // reports still sooner, and the measurement fade-in is not waiting on a long coast.
+  controls.dampingFactor = 0.22;
   controls.rotateSpeed = 0.58;
   controls.zoomSpeed = 0.72;
   controls.panSpeed = 0.65;
@@ -5632,6 +5960,11 @@ function createThreeScene(host: HTMLDivElement): ThreeState {
     animationId: 0,
     needsRender: true,
     wasCameraMoving: false,
+    cameraStillFrames: 0,
+    cameraOverlayHold: false,
+    cameraHoldPosition: new THREE.Vector3(),
+    cameraHoldTarget: new THREE.Vector3(),
+    cameraHoldQuaternion: new THREE.Quaternion(),
     lastOverlaySync: 0,
     lastViewCubeSync: 0,
     rotationHandleSides: null,
@@ -5734,6 +6067,127 @@ function orbitCameraByPointerDelta(state: ThreeState, deltaX: number, deltaY: nu
   state.camera.updateProjectionMatrix();
   state.controls.update();
   state.needsRender = true;
+}
+
+function stopCameraCoast(controls: OrbitControls) {
+  const coast = controls as OrbitControls & {
+    _sphericalDelta?: { set: (x: number, y: number, z: number) => void };
+    _panOffset?: { set: (x: number, y: number, z: number) => void };
+  };
+  coast._sphericalDelta?.set(0, 0, 0);
+  coast._panOffset?.set(0, 0, 0);
+}
+
+const FACE_SNAP_HOVER_NAME = "FaceSnapHover";
+const FACE_SNAP_LOCK_NAME = "FaceSnapLock";
+
+function clearNamedHelper(state: ThreeState, name: string) {
+  const existing = state.helperLayer.getObjectByName(name);
+  if (!existing) return;
+  state.helperLayer.remove(existing);
+  existing.traverse((child) => {
+    if (!(child instanceof THREE.Mesh)) return;
+    child.geometry.dispose();
+    const materials = Array.isArray(child.material) ? child.material : [child.material];
+    materials.forEach((material) => material.dispose());
+  });
+}
+
+function syncFaceSnapHighlight(
+  state: ThreeState,
+  name: string,
+  shape: WorkplaneShape | null,
+  pick: { shapeId: string; point: [number, number, number]; normal: [number, number, number] } | null,
+  opacity: number,
+) {
+  const existing = state.helperLayer.getObjectByName(name);
+  if (!shape || !pick) {
+    if (existing) {
+      clearNamedHelper(state, name);
+      state.needsRender = true;
+    }
+    return;
+  }
+  const key = `${pick.shapeId}:${pick.normal.join(",")}`;
+  if (existing?.userData.faceKey === key) return;
+  clearNamedHelper(state, name);
+  const positions = faceSnapQuadPositions(shape, pick.point, pick.normal);
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  const mesh = new THREE.Mesh(
+    geometry,
+    new THREE.MeshBasicMaterial({
+      color: name === FACE_SNAP_LOCK_NAME ? "#8c6a3d" : "#c4a36a",
+      transparent: true,
+      opacity,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    }),
+  );
+  mesh.name = name;
+  mesh.userData.faceKey = key;
+  mesh.renderOrder = 4;
+  state.helperLayer.add(mesh);
+  state.needsRender = true;
+}
+
+function faceSnapQuadPositions(
+  shape: WorkplaneShape,
+  point: [number, number, number],
+  normal: [number, number, number],
+): Float32Array {
+  const box = snapAabbFromShape(shape);
+  const ax = Math.abs(normal[0]);
+  const ay = Math.abs(normal[1]);
+  const az = Math.abs(normal[2]);
+  const axis = ax >= ay && ax >= az ? 0 : ay >= az ? 1 : 2;
+  const sign = Math.sign(normal[axis]) || 1;
+  const plane = point[axis] + sign * 0.45;
+  const pad = 0.8;
+  const x0 = box.minX - pad;
+  const x1 = box.maxX + pad;
+  const y0 = box.minY - pad;
+  const y1 = box.maxY + pad;
+  const z0 = box.minZ - pad;
+  const z1 = box.maxZ + pad;
+  const corners = axis === 0
+    ? [[plane, y0, z0], [plane, y1, z0], [plane, y1, z1], [plane, y0, z1]]
+    : axis === 1
+      ? [[x0, plane, z0], [x1, plane, z0], [x1, plane, z1], [x0, plane, z1]]
+      : [[x0, y0, plane], [x1, y0, plane], [x1, y1, plane], [x0, y1, plane]];
+  return new Float32Array([
+    ...corners[0], ...corners[1], ...corners[2],
+    ...corners[0], ...corners[2], ...corners[3],
+  ]);
+}
+
+function axisNormal(normal: THREE.Vector3): [number, number, number] | null {
+  const ax = Math.abs(normal.x);
+  const ay = Math.abs(normal.y);
+  const az = Math.abs(normal.z);
+  const largest = Math.max(ax, ay, az);
+  if (largest < 1e-8) return null;
+  if (ax === largest) return [Math.sign(normal.x) || 1, 0, 0];
+  if (ay === largest) return [0, Math.sign(normal.y) || 1, 0];
+  return [0, 0, Math.sign(normal.z) || 1];
+}
+
+function rememberCameraHoldPose(state: ThreeState) {
+  state.cameraHoldPosition.copy(state.camera.position);
+  state.cameraHoldTarget.copy(state.controls.target);
+  state.cameraHoldQuaternion.copy(state.camera.quaternion);
+}
+
+function cameraHoldPoseMoved(state: ThreeState) {
+  const rotationDelta = 8 * (1 - Math.abs(state.cameraHoldQuaternion.dot(state.camera.quaternion)));
+  return (
+    state.camera.position.distanceToSquared(state.cameraHoldPosition) > CAMERA_OVERLAY_TRAIL_EPS ||
+    state.controls.target.distanceToSquared(state.cameraHoldTarget) > CAMERA_OVERLAY_TRAIL_EPS ||
+    rotationDelta > CAMERA_OVERLAY_TRAIL_EPS
+  );
 }
 
 function constrainCamera(state: ThreeState, workspace: WorkspaceSettings) {
@@ -7619,6 +8073,45 @@ function createImagePlateMaterials(shape: WorkplaneShape, sideMaterial: THREE.Me
   ];
 }
 
+const largePickRay = new THREE.Ray();
+const largePickInverse = new THREE.Matrix4();
+const largePickHit = new THREE.Vector3();
+const LARGE_PICK_TRIANGLE_CAP = 4_000;
+const HEAVY_SCENE_TRIANGLES = 80_000;
+
+function importedTriangleTotal(shapes: WorkplaneShape[]): number {
+  let total = 0;
+  for (const shape of shapes) total += shape.importedMesh?.triangleCount ?? 0;
+  return total;
+}
+
+function afterNextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    const fallback = window.setTimeout(resolve, 250);
+    window.requestAnimationFrame(() => {
+      window.setTimeout(() => {
+        window.clearTimeout(fallback);
+        resolve();
+      }, 0);
+    });
+  });
+}
+
+/** Precise triangle tests on a reduced watch movement lock the window. The box is enough to select it. */
+function raycastImportedBounds(this: THREE.Mesh, raycaster: THREE.Raycaster, intersects: THREE.Intersection[]) {
+  const geometry = this.geometry;
+  if (!geometry.boundingBox) geometry.computeBoundingBox();
+  const box = geometry.boundingBox;
+  if (!box) return;
+  largePickInverse.copy(this.matrixWorld).invert();
+  largePickRay.copy(raycaster.ray).applyMatrix4(largePickInverse);
+  if (largePickRay.intersectBox(box, largePickHit) === null) return;
+  const point = largePickHit.clone().applyMatrix4(this.matrixWorld);
+  const distance = raycaster.ray.origin.distanceTo(point);
+  if (distance < raycaster.near || distance > raycaster.far) return;
+  intersects.push({ distance, point, object: this });
+}
+
 function addMesh(
   group: THREE.Group,
   geometry: THREE.BufferGeometry,
@@ -7633,6 +8126,9 @@ function addMesh(
   const importedTriangles = shape.importedMesh?.triangleCount ?? 0;
   mesh.castShadow = !shape.hole && !shape.construction && importedTriangles <= hardwareProfile().shadowCasterTriangleLimit;
   mesh.receiveShadow = false;
+  if (importedTriangles > LARGE_PICK_TRIANGLE_CAP) {
+    mesh.raycast = raycastImportedBounds;
+  }
   if (position) {
     mesh.position.copy(position);
   }
@@ -7664,7 +8160,7 @@ function addMesh(
   const facetedSolid = !curvedSurface && !roundedBox && !shape.importedMesh;
   const showIdleEdges = !shape.hole && !shape.construction && !shape.importedMesh && (sharpDetailEdges || facetedSolid);
   const importedTriangleCount = shape.importedMesh?.triangleCount ?? 0;
-  const skipHeavyImportedEdges = Boolean(shape.importedMesh) && importedTriangleCount > IMPORTED_SELECTED_EDGE_TRIANGLE_LIMIT;
+  const skipHeavyImportedEdges = Boolean(shape.importedMesh) && importedTriangleCount > Math.min(IMPORTED_SELECTED_EDGE_TRIANGLE_LIMIT, 20_000);
   const selectedOutline = Boolean(group.userData.showEdges);
   if ((group.userData.showEdges || showIdleEdges) && !skipHeavyImportedEdges) {
     const selectedRoundedBox = selectedOutline && shape.kind === "box" && Boolean(shape.radius && shape.radius > 0);
@@ -7742,6 +8238,34 @@ function addCadDisplayEdges(group: THREE.Group, shape: WorkplaneShape, color: st
   return true;
 }
 
+function setFlatTriangleNormals(geometry: THREE.BufferGeometry) {
+  const position = geometry.getAttribute("position");
+  const normals = new Float32Array(position.count * 3);
+  const a = new THREE.Vector3();
+  const b = new THREE.Vector3();
+  const c = new THREE.Vector3();
+  const ab = new THREE.Vector3();
+  const ac = new THREE.Vector3();
+  const normal = new THREE.Vector3();
+  for (let i = 0; i + 2 < position.count; i += 3) {
+    a.fromBufferAttribute(position, i);
+    b.fromBufferAttribute(position, i + 1);
+    c.fromBufferAttribute(position, i + 2);
+    ab.subVectors(b, a);
+    ac.subVectors(c, a);
+    normal.crossVectors(ab, ac);
+    if (normal.lengthSq() < 1e-12) normal.set(0, 1, 0);
+    else normal.normalize();
+    for (let corner = 0; corner < 3; corner += 1) {
+      const offset = (i + corner) * 3;
+      normals[offset] = normal.x;
+      normals[offset + 1] = normal.y;
+      normals[offset + 2] = normal.z;
+    }
+  }
+  geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+}
+
 function getImportedMeshCache(mesh: NonNullable<WorkplaneShape["importedMesh"]>) {
   const cached = importedGeometryCache.get(mesh);
   if (cached) {
@@ -7755,6 +8279,8 @@ function getImportedMeshCache(mesh: NonNullable<WorkplaneShape["importedMesh"]>)
   }
   if (mesh.normals && mesh.normals.length === mesh.positions.length) {
     geometry.setAttribute("normal", new THREE.Float32BufferAttribute(mesh.normals, 3));
+  } else if (!geometry.index && Math.floor(mesh.positions.length / 9) > 80_000) {
+    setFlatTriangleNormals(geometry);
   } else {
     geometry.computeVertexNormals();
   }

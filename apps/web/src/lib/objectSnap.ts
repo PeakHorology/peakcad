@@ -177,3 +177,31 @@ export function snapMovingAabb(
 export function objectSnapTolerance(gridStep: number) {
   return Math.max(OBJECT_SNAP_DEFAULT_TOLERANCE, gridStep > 0 ? gridStep : 0);
 }
+
+export type FaceSnapSample = {
+  point: [number, number, number];
+  normal: [number, number, number];
+};
+
+/** Slide the first side onto the second along the side’s axis, so the faces meet and do not pass through. */
+export function faceToFaceTranslation(source: FaceSnapSample, target: FaceSnapSample): { x: number; y: number; z: number } | null {
+  const sourceAxis = dominantAxisIndex(source.normal);
+  const targetAxis = dominantAxisIndex(target.normal);
+  if (sourceAxis === null || targetAxis === null) return null;
+  const axis = sourceAxis === targetAxis ? sourceAxis : targetAxis;
+  const delta = clean(target.point[axis] - source.point[axis]);
+  if (axis === 0) return { x: delta, y: 0, z: 0 };
+  if (axis === 1) return { x: 0, y: delta, z: 0 };
+  return { x: 0, y: 0, z: delta };
+}
+
+function dominantAxisIndex(normal: [number, number, number]): 0 | 1 | 2 | null {
+  const ax = Math.abs(normal[0]);
+  const ay = Math.abs(normal[1]);
+  const az = Math.abs(normal[2]);
+  const largest = Math.max(ax, ay, az);
+  if (largest < 1e-8) return null;
+  if (ax === largest) return 0;
+  if (ay === largest) return 1;
+  return 2;
+}

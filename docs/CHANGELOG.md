@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.1
+
+- Reduce File Size lowers the triangle count of an imported mesh for STL export, keeping sharp edges and small parts.
+- Optional folder passwords. Projects in a locked folder stay out of Recents and the main project list.
+- Snap mates one side of a shape to a side of another, with a highlight on the face under the cursor.
+- A click on empty workplane space clears the selection. Shapes can sit past the workplane.
+- Measurement labels fade while the camera moves and return when you let go.
+- The shape list scrolls when the window is short. Panels, menus, and dialogs ease in and out.
+
 ## 1.0.0
 
 - First 1.0 desktop release, licensed GPL-3.0-or-later.

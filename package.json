@@ -1,6 +1,6 @@
 {
   "name": "peakcad",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "license": "GPL-3.0-or-later",
   "author": "PeakHorologyLLC",
@@ -41,6 +41,7 @@
     "jspdf": "^4.2.1",
     "lucide-react": "^0.511.0",
     "manifold-3d": "^3.5.0",
+    "meshoptimizer": "^1.3.0",
     "next": "^15.3.2",
     "occt-wasm": "^3.6.1",
     "react": "^19.1.0",

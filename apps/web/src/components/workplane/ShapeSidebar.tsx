@@ -3,7 +3,7 @@
 import { useRef, useState, type MutableRefObject } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { toolbarShapeAssets, type ToolbarShapeAsset } from "@/lib/shapeCatalog";
-import { applyTransparentDragImage, beginShapeAssetDrag, endShapeAssetDrag } from "@/lib/shapeAssetDrag";
+import { beginShapeAssetDrag, endShapeAssetDrag } from "@/lib/shapeAssetDrag";
 import { PeakTipButton, usePeakContextHelp } from "@/components/workplane/ToolNameTooltip";
 import { TOOL_DESCRIPTIONS } from "@/lib/toolDescriptions";
 import type { ShapeAsset, WorkplaneShape } from "@/types/sketchforge";
@@ -97,7 +97,8 @@ function ShapeToolButton({
         event.dataTransfer.effectAllowed = "copy";
         event.dataTransfer.setData("application/x-sketchforge-shape", JSON.stringify(shape));
         beginShapeAssetDrag(shape);
-        applyTransparentDragImage(event.dataTransfer);
+        const rect = event.currentTarget.getBoundingClientRect();
+        event.dataTransfer.setDragImage(event.currentTarget, event.clientX - rect.left, event.clientY - rect.top);
       }}
       onDragEnd={() => {
         endShapeAssetDrag();

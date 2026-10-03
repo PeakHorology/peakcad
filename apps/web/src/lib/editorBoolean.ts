@@ -3037,12 +3037,16 @@ export async function buildGroupedShapeFromSelection(groupable: WorkplaneShape[]
     ? booleanMeshShape(booleanSelection)
     : null;
   const cutGroup = exactImportedGroup ?? bvhCutGroup;
+  const solidOperands = booleanSelection.filter((shape) => !shape.hole && !shape.locked);
+  const singleColorMeshGroup = !manifoldUnionGroup && solidOperands.length >= 2
+    ? mergedMeshShape(solidOperands)
+    : null;
   const group = occtGroup ?? (hasSolid && hasHole
     ? manifoldCutGroup ??
       cleanBoxGroup ??
       cutGroup
     : manifoldUnionGroup ??
-      concatenatedImportedMeshShape(booleanSelection) ??
+      singleColorMeshGroup ??
       groupedShape(groupable));
   // Keep the user's selected operands as the CSG tree, not flattened boolean
   // leaves, so Ungroup peels one Group at a time.

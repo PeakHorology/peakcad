@@ -10,6 +10,7 @@ import { TextGeometry } from "three/examples/jsm/geometries/TextGeometry.js";
 import { RoundedBoxGeometry } from "three/examples/jsm/geometries/RoundedBoxGeometry.js";
 import { mergeVertices } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import { clearManifoldRuntimeCache, getManifoldRuntime } from "@/lib/manifoldRuntime";
+import { simplifiedImportedShapePatch } from "@/lib/meshSimplify";
 import {
   modifierQualityForDisplay,
   resolveHollowCylinderSegments,
@@ -98,7 +99,7 @@ import {
 import { meshDataToTransfer, runManifoldBooleanInWorker, warmManifoldBooleanWorker } from "@/lib/manifoldBooleanClient";
 import { cloneWorkplaneShapeSnapshot, compactEdgeTreatmentHistory, edgeTreatmentAppliedFrame, lastEditableEdgeTreatment, restoreShapeBeforeEdgeTreatment } from "@/lib/edgeTreatmentHistory";
 import { appendEditorHistorySnapshot, editorHistoryEntry, expandHistoryShapes, historyShapeMissingTessellation, historyShapeNeedsRemesh, hydrateEditorHistoryState, projectShapesFingerprint, type EditorHistoryEntry, type EditorHistoryState } from "@/lib/editorHistory";
-import { snapShapeFootprintToVisibleGrid, visibleGridStep } from "@/lib/gridSnap";
+import { faceToFaceTranslation } from "@/lib/objectSnap";
 import { createLocalId } from "@/lib/localIds";
 import {
   CIRCULAR_PATTERN_DEFAULT_COUNT,
@@ -1150,6 +1151,7 @@ export function SketchForgeEditor({
   projectId,
   projectName = "PeakCAD design",
   projectRevision = 0,
+  onViewportReady,
 }: {
   initialShapes?: WorkplaneShape[];
   initialHistory?: EditorHistoryEntry[];
@@ -1173,6 +1175,7 @@ export function SketchForgeEditor({
   projectId?: string | null;
   projectName?: string;
   projectRevision?: number;
+  onViewportReady?: () => void;
 } = {}) {
   const initialSceneRef = useRef<WorkplaneShape[] | null>(null);
   if (initialSceneRef.current === null) {
@@ -1207,6 +1210,21 @@ export function SketchForgeEditor({
   const [snapGrid, setSnapGrid] = useState<GridSize>(() => normalizeSnapGrid(initialSnap, DEFAULT_SNAP_GRID));
   const [menuOpen, setMenuOpen] = useState(false);
   const [topPanel, setTopPanel] = useState<TopPanel>(null);
+  const [renderedTopPanel, setRenderedTopPanel] = useState<TopPanel>(null);
+  const [topPanelClosing, setTopPanelClosing] = useState(false);
+  useEffect(() => {
+    if (topPanel) {
+      setRenderedTopPanel(topPanel);
+      setTopPanelClosing(false);
+      return;
+    }
+    setTopPanelClosing(true);
+    const timer = window.setTimeout(() => {
+      setRenderedTopPanel(null);
+      setTopPanelClosing(false);
+    }, 140);
+    return () => window.clearTimeout(timer);
+  }, [topPanel]);
   const [stepExporting, setStepExporting] = useState(false);
   const [exportSuccess, setExportSuccess] = useState<ExportSuccessPayload | null>(null);
   const exportSuccessSeqRef = useRef(0);
@@ -1217,6 +1235,8 @@ export function SketchForgeEditor({
   const [blueprintExporting, setBlueprintExporting] = useState(false);
   const [blueprintExportOpen, setBlueprintExportOpen] = useState(false);
   const [alignMode, setAlignMode] = useState(false);
+  const [faceSnap, setFaceSnap] = useState<{ source: { shapeId: string; point: [number, number, number]; normal: [number, number, number] } | null } | null>(null);
+  const faceSnapMotionRef = useRef<((shapeId: string, delta: { x: number; y: number; z: number }, done: () => void) => void) | null>(null);
   const [alignAnchorId, setAlignAnchorId] = useState<string | null>(null);
   const [alignPreview, setAlignPreview] = useState<{ axis: AlignAxis; target: AlignTarget } | null>(null);
   const [mirrorMode, setMirrorMode] = useState(false);
@@ -1548,6 +1568,7 @@ export function SketchForgeEditor({
     if (keep !== "fillet") {
       invalidateCadModifierSession();
     }
+    setFaceSnap(null);
   }, [invalidateCadModifierSession]);
 
   useEffect(() => {
@@ -5148,7 +5169,7 @@ export function SketchForgeEditor({
   }, [applyCircularPattern, cancelCircularPattern, circularPattern]);
 
   useEffect(() => {
-    if (!alignMode && !mirrorMode) return;
+    if (!alignMode && !mirrorMode && !faceSnap) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.preventDefault();
@@ -5162,10 +5183,14 @@ export function SketchForgeEditor({
         setMirrorPreviewAxis(null);
         setNotice("Mirror cancelled");
       }
+      if (faceSnap) {
+        setFaceSnap(null);
+        setNotice("Snap cancelled");
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [alignMode, mirrorMode]);
+  }, [alignMode, faceSnap, mirrorMode]);
 
   const postCadModifierRequest = useCallback((request: CadModifierWorkerPayload, transfer: Transferable[] = []) => {
     // Prefer a live worker; cold-start once if a prior crash cleared the ref.
@@ -5630,22 +5655,54 @@ export function SketchForgeEditor({
   }, [armCadModifierWatchdog, edgeModifier?.amount, edgeModifier?.chamferAngle, edgeModifier?.kind, edgeModifier?.prepared, edgeModifier?.quality, edgeModifier?.selectedEdgeIds, postCadModifierRequest]);
 
   const snapSelected = useCallback(() => {
-    if (!hasSelection) {
-      setNotice("Select a shape first");
+    if (faceSnap) {
+      setFaceSnap(null);
+      setNotice("Snap cancelled");
       return;
     }
-    const selected = new Set(selectedIds);
-    const grid = visibleGridStep(workspaceSettings);
-    commitShapes(
-      shapes.map((shape) =>
-        selected.has(shape.id) && !shape.locked
-          ? snapShapeFootprintToVisibleGrid(shape, meshAabb(shape), workspaceSettings)
-          : shape,
-      ),
-      selectedIds,
-      `Snapped ${selectedShapes.length} shape${selectedShapes.length === 1 ? "" : "s"} to ${grid} mm visible grid`,
-    );
-  }, [commitShapes, hasSelection, selectedIds, selectedShapes.length, shapes, workspaceSettings]);
+    clearEditorToolSessions();
+    setFaceSnap({ source: null });
+    setNotice("Click the side to move, then the side to snap it to");
+  }, [clearEditorToolSessions, faceSnap]);
+
+  const pickFaceSnap = useCallback((pick: { shapeId: string; point: [number, number, number]; normal: [number, number, number] }) => {
+    if (!faceSnap) return;
+    if (!faceSnap.source) {
+      const shape = shapesRef.current.find((item) => item.id === pick.shapeId);
+      if (!shape || shape.locked) {
+        setNotice(shape?.locked ? "That shape is locked" : "Click a shape");
+        return;
+      }
+      setFaceSnap({ source: pick });
+      setNotice("Now click the side to snap it to");
+      return;
+    }
+    if (pick.shapeId === faceSnap.source.shapeId) {
+      setNotice("Click a side on the other shape");
+      return;
+    }
+    const delta = faceToFaceTranslation(faceSnap.source, pick);
+    if (!delta) {
+      setNotice("Could not snap those sides");
+      return;
+    }
+    const sourceId = faceSnap.source.shapeId;
+    const deltaCopy = delta;
+    const finish = () => {
+      commitShapes(
+        shapesRef.current.map((shape) => shape.id === sourceId && !shape.locked
+          ? { ...shape, x: shape.x + deltaCopy.x, z: shape.z + deltaCopy.z, elevation: (shape.elevation ?? 0) + deltaCopy.y }
+          : shape),
+        [sourceId],
+        "Snapped sides together",
+      );
+      setNotice("Snapped sides together");
+    };
+    setFaceSnap(null);
+    const motion = faceSnapMotionRef.current;
+    if (motion) motion(sourceId, deltaCopy, finish);
+    else finish();
+  }, [commitShapes, faceSnap]);
 
   const toggleHidden = useCallback(() => {
     if (!hasSelection) {
@@ -5998,6 +6055,34 @@ export function SketchForgeEditor({
       setNotice("Shaft kept as solid; thread cutter is a Hole — adjust Clearance, then Group with your part");
     }
   }, [commitShapes, selectedShape, selectedShapes.length, shapes]);
+
+  const reduceSelectedMesh = useCallback(async (keepFraction: number) => {
+    if (!selectedShape?.importedMesh) {
+      setNotice("Select an imported mesh to reduce");
+      return;
+    }
+    if (selectedShape.locked) {
+      setNotice("Unlock the object before reducing triangles");
+      return;
+    }
+    let patch: Partial<WorkplaneShape> | null = null;
+    try {
+      patch = await simplifiedImportedShapePatch(selectedShape, keepFraction);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Could not reduce this mesh");
+      return;
+    }
+    if (!patch?.importedMesh) {
+      setNotice("Could not reduce this mesh. Try a lower detail setting.");
+      return;
+    }
+    const next = { ...selectedShape, ...patch };
+    commitShapes(
+      shapesRef.current.map((shape) => (shape.id === selectedShape.id ? next : shape)),
+      selectedShape.id,
+      `Reduced ${selectedShape.name} to ${patch.importedMesh.triangleCount.toLocaleString()} triangles`,
+    );
+  }, [commitShapes, selectedShape]);
 
   const mcpSceneSnapshot = useCallback((includeRawShapes = false): SketchForgeMcpSceneSummary & { rawShapes?: WorkplaneShape[] } => {
     const projectInfo = projectInfoRef.current;
@@ -8207,6 +8292,7 @@ export function SketchForgeEditor({
           initialSnap={initialSnap}
           initialWorkspace={initialWorkspace}
           workspaceSettingsKey={projectId ?? "local-workplane"}
+          onSceneReady={onViewportReady}
           onAddShape={addShape}
           onAlignAnchorChange={chooseAlignAnchor}
           onAlignPreview={previewAlignSelection}
@@ -8225,6 +8311,7 @@ export function SketchForgeEditor({
           )?.sketchDoc?.dimensions?.length ? editSelectedSketchDimension : undefined}
           canSeparateParts={canSeparateSelectedParts}
           onSeparateParts={separateSelectedParts}
+          onReduceTriangles={reduceSelectedMesh}
           activeFeatureId={activeFeatureId}
           onSelectFeature={(featureId) => {
             setActiveFeatureId(featureId);
@@ -8260,6 +8347,10 @@ export function SketchForgeEditor({
           rotationEditApiRef={rotationEditApiRef}
           onDropToWorkplane={dropSelectedToWorkplane}
           onSnapSelection={snapSelected}
+          faceSnapActive={faceSnap !== null}
+          faceSnapSource={faceSnap?.source ?? null}
+          faceSnapMotionRef={faceSnapMotionRef}
+          onFaceSnapPick={pickFaceSnap}
           inspectorDockTop={
             edgeModifier ? (
               <EdgeModifierPanel
@@ -8410,9 +8501,10 @@ export function SketchForgeEditor({
           </>
         )}
       </div>
-      {topPanel ? (
+      {renderedTopPanel ? (
         <TopActionPanel
-          panel={topPanel}
+          panel={renderedTopPanel}
+          closing={topPanelClosing}
           shapeCount={exportableShapeCount}
           scopeLabel={exportScopeLabel}
           stepPreflight={exportPreflight}
@@ -8522,6 +8614,7 @@ export function SketchForgeEditor({
 
 function TopActionPanel({
   panel,
+  closing = false,
   shapeCount,
   scopeLabel,
   stepPreflight,
@@ -8541,6 +8634,7 @@ function TopActionPanel({
   onKeepStlOrientation,
 }: {
   panel: Exclude<TopPanel, null>;
+  closing?: boolean;
   shapeCount: number;
   scopeLabel: "selected" | "total";
   stepPreflight: StepPreflightRow[];
@@ -8567,7 +8661,7 @@ function TopActionPanel({
         : "Import";
 
   return (
-    <div className="top-action-panel" role="dialog" aria-label={title}>
+    <div className={`top-action-panel${closing ? " is-closing" : ""}`} role="dialog" aria-label={title}>
       <header>
         <strong>{title}</strong>
         <button aria-label={`Close ${title}`} onClick={onClose}>

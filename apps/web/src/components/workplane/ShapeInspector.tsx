@@ -5,6 +5,7 @@ import { useEffect, useRef, useState, type CSSProperties, type Dispatch, type Se
 import { ToolbarHideSelectedIcon } from "@/components/icons";
 import { InlineValueDialog } from "@/components/workplane/InlineValueDialog";
 import { PeakTipButton, PeakTipLabel } from "@/components/workplane/ToolNameTooltip";
+import { TOOL_DESCRIPTIONS } from "@/lib/toolDescriptions";
 import { displayStepFromMillimeters, displayToMillimeters, formatMeasurementNumber, lengthDisplayUnit, millimetersToDisplay } from "@/lib/measurementUnits";
 import {
   clampRoofRidgeX,
@@ -437,6 +438,7 @@ export function ShapeInspector({
   onEditSketchDimension,
   canSeparateParts = false,
   onSeparateParts,
+  onReduceTriangles,
   onInteractionActiveChange,
   activeFeatureId = null,
   onSelectFeature,
@@ -455,6 +457,7 @@ export function ShapeInspector({
   onEditSketchDimension?: (dimensionId: string, value: number) => void;
   canSeparateParts?: boolean;
   onSeparateParts?: () => void;
+  onReduceTriangles?: (keepFraction: number) => void;
   onInteractionActiveChange?: (active: boolean) => void;
   /** In-body feature selection (CSG child id). */
   activeFeatureId?: string | null;
@@ -494,10 +497,16 @@ export function ShapeInspector({
   const pattern = shape.patternFeature;
   const holeSpec = shape.holeSpec ?? inspectTarget.holeSpec;
   const showShallowFeatures = Boolean(pattern || (shape.edgeTreatments?.length ?? 0) > 0 || holeSpec || shape.construction);
+  const sourceTriangleCount = inspectTarget.groupedShapes?.length
+    ? inspectTarget.groupedShapes.reduce((total, child) => total + (child.importedMesh?.triangleCount ?? 0), 0) || (inspectTarget.importedMesh?.triangleCount ?? 0)
+    : (inspectTarget.importedMesh?.triangleCount ?? 0);
   const [propertiesOpen, setPropertiesOpen] = useState(true);
   const [colorOpen, setColorOpen] = useState(false);
   const [featuresOpen, setFeaturesOpen] = useState(true);
   const [dimensionDialog, setDimensionDialog] = useState<{ id: string; value: number } | null>(null);
+  const [reduceOpen, setReduceOpen] = useState(false);
+  const [keepPercent, setKeepPercent] = useState(50);
+  const [reducing, setReducing] = useState(false);
   const [draftColor, setDraftColor] = useState(solidColor);
   const colorPickingRef = useRef(false);
 
@@ -652,6 +661,62 @@ export function ShapeInspector({
               {dimension.kind} {dimension.value.toFixed(2)} mm{dimension.driving ? "" : " (driven)"}
             </button>
           ))}
+        </div>
+      ) : null}
+
+      {inspectTarget.importedMesh && !feature && onReduceTriangles ? (
+        <div className="mesh-reduce">
+          <p className="mesh-reduce-count">Triangles: {(inspectTarget.importedMesh.triangleCount || sourceTriangleCount).toLocaleString()}</p>
+          {reduceOpen ? (
+            <>
+              <label className="mesh-reduce-slider">
+                <span>Keep {keepPercent}% detail</span>
+                <input
+                  type="range"
+                  min={10}
+                  max={100}
+                  step={5}
+                  value={keepPercent}
+                  disabled={locked || reducing}
+                  onChange={(event) => setKeepPercent(Number(event.currentTarget.value))}
+                />
+              </label>
+              <p className="mesh-reduce-note">
+                Target {Math.max(12, Math.round(sourceTriangleCount * keepPercent / 100)).toLocaleString()} triangles. Large faces become large triangles so the file shrinks. Small parts and sharp edges stay so the engraving still reads as the movement.
+                {inspectTarget.importedMesh.brepStep ? " Exact STEP export still uses the saved solid." : ""}
+              </p>
+              <button
+                className="inspector-action-button"
+                type="button"
+                disabled={locked || reducing || keepPercent >= 100}
+                onClick={() => {
+                  setReducing(true);
+                  void Promise.resolve(onReduceTriangles(keepPercent / 100)).finally(() => {
+                    setReducing(false);
+                    setReduceOpen(false);
+                  });
+                }}
+              >
+                <span>{reducing ? "Reducing…" : "Apply"}</span>
+              </button>
+              <button className="inspector-action-button" type="button" disabled={reducing} onClick={() => setReduceOpen(false)}>
+                <span>Cancel</span>
+              </button>
+            </>
+          ) : (
+            <>
+            <PeakTipButton
+              className="inspector-action-button"
+              label="Reduce File Size"
+              description={TOOL_DESCRIPTIONS.reduceFileSize}
+              disabled={locked}
+              onClick={() => setReduceOpen(true)}
+            >
+              <span>Reduce File Size</span>
+            </PeakTipButton>
+              <p className="mesh-reduce-scope">(For STL exports only)</p>
+            </>
+          )}
         </div>
       ) : null}
 

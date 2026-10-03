@@ -921,6 +921,8 @@
   box-shadow: var(--elevation-lg);
   font-family: var(--font-ui);
   pointer-events: auto;
+  transform-origin: top left;
+  animation: chrome-menu-in var(--motion-enter) var(--motion-ease);
 }
 
 .peak-tool-help strong {
@@ -1316,6 +1318,13 @@
   border: 1px solid var(--control-border);
   border-radius: var(--radius-sm);
   box-shadow: var(--elevation-lg);
+  transform-origin: top right;
+  animation: chrome-rise-in var(--motion-enter) var(--motion-ease);
+}
+
+.top-action-panel.is-closing {
+  animation: chrome-rise-out var(--motion-exit) var(--motion-ease) forwards;
+  pointer-events: none;
 }
 
 .top-action-panel header {
@@ -1889,6 +1898,43 @@
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.project-open-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--peak-paper) 72%, transparent);
+  pointer-events: none;
+}
+
+.viewport-busy {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  z-index: var(--z-modal);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  color: var(--peak-charcoal);
+  background: var(--glass-surface-strong);
+  border: 1px solid var(--peak-border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elevation-lg);
+  font-size: var(--text-2xs);
+  font-weight: 800;
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.viewport-busy-wheel {
+  width: 16px;
+  height: 16px;
+  margin-bottom: 0;
+  border-width: 3px;
 }
 
 /* Leave-project prompt reuses the dashboard confirm dialog; Don't save sits apart from Cancel / Save. */
