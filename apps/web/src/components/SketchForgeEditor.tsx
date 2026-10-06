@@ -330,6 +330,7 @@ import {
   type SketchForgeMcpViewFace,
 } from "@/lib/sketchforgeMcpProtocol";
 import type { CadModifierComponentMesh, CadModifierDisplayEdge, CadModifierEdge, CadModifierKind, CadModifierMeshPart, CadModifierPrimitivePart, CadModifierQuality, CadModifierWorkerRequest, CadModifierWorkerResponse } from "@/lib/cadModifierTypes";
+import { takePreloadedCadModifierWorker } from "@/lib/cadModifierPreload";
 import { nearestMetricThreadForDiameter, type MetricThreadDesignation } from "@/lib/metricThreads";
 import { canSeparateThreadScrew, createThreadShape, DEFAULT_THREAD_DESIGNATION, separateThreadScrewParts } from "@/lib/threadShape";
 import type { AlignAxis, AlignHandleStatus, AlignTarget, GridSize, ShapeAsset, SketchImage, SketchPlane, SketchPoint, SketchProfile, SketchSegment, WorkplaneShape, WorkplaneWorkspaceSettings } from "@/types/sketchforge";
@@ -1434,7 +1435,8 @@ export function SketchForgeEditor({
       try {
         // Single primary worker only — a warm spare doubled startup failures and memory
         // without helping the common fillet/chamfer path (OCCT loads lazily on prepare).
-        const worker = bindPrimaryWorker(new Worker(new URL("../workers/cadModifier.worker.ts", import.meta.url), { type: "module" }));
+        const adopted = takePreloadedCadModifierWorker();
+        const worker = bindPrimaryWorker(adopted ?? new Worker(new URL("../workers/cadModifier.worker.ts", import.meta.url), { type: "module" }));
         cadModifierWorkerRef.current = worker;
         return worker;
       } catch (error) {

@@ -12,8 +12,8 @@ npm run package:desktop
 
 This creates files in the `dist-release/` folder:
 
-- `PeakCAD-Setup-1.0.1.exe` — installer (adds Start Menu + Desktop shortcut; version matches `package.json`)
-- `PeakCAD-1.0.1-portable.exe` — portable build (no install needed; not an upgrader)
+- `PeakCAD-Setup-1.0.2.exe` — installer (adds Start Menu + Desktop shortcut; version matches `package.json`)
+- `PeakCAD-1.0.2-portable.exe` — portable build (no install needed; not an upgrader)
 
 Close any running PeakCAD window before packaging. Run the Setup or portable exe — that is PeakCAD.
 

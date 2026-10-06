@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.2
+
+- Fillets and chamfers keep merged flat faces, skip a full edge walk when adding another edge, and draw every highlight from one line.
+- A click selects the surface under the cursor. Empty space in the view clears the selection. The shape under the cursor shows a light outline before you click.
+- Dense imported meshes build a pick index on the first click. A part's shadow hides while you drag it and returns when you let go.
+- Selecting a shape no longer rebuilds its mesh. Pattern copies share one geometry.
+- Startup shows the PeakCAD mark while the CAD engine loads, then Start Modeling opens your projects.
+
 ## 1.0.1
 
 - Reduce File Size lowers the triangle count of an imported mesh for STL export, keeping sharp edges and small parts.

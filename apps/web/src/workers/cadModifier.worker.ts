@@ -433,7 +433,9 @@ function solidFromCoplanarRegions(cad: OcctKernel, part: CadModifierMeshPart): S
     list.push(index);
     groups.set(root, list);
   });
-  if (groups.size > triCount * 0.5) return null;
+  // Keep a partial merge. A curved mesh still has many unmerged triangles; throwing
+  // the flat walls away forced every later fillet to walk those triangles again.
+  if (groups.size > triCount * 0.9) return null;
   const faces: ShapeHandle[] = [];
   try {
     for (const [root, members] of groups) {
@@ -926,35 +928,66 @@ function curvedCornerTool(
   return cad.pipe(profile, cad.makeWire([edge]));
 }
 
+function edgeMatchSample(cad: OcctKernel, edge: ShapeHandle) {
+  const params = cad.curveParameters(edge);
+  const closed = cad.curveIsClosed(edge);
+  const span = params.last - params.first;
+  const sampleParam = closed ? params.first + span * 0.37 : params.first + span * 0.5;
+  return {
+    sample: cad.curvePointAtParam(edge, sampleParam),
+    tangent: unitVec(cad.curveTangent(edge, params.first)),
+  };
+}
+
+function pointSegmentDistance(
+  point: { x: number; y: number; z: number },
+  start: { x: number; y: number; z: number },
+  end: { x: number; y: number; z: number },
+) {
+  const delta = subVec(end, start);
+  const lengthSq = dotVec(delta, delta);
+  const amount = lengthSq > 1e-12 ? Math.max(0, Math.min(1, dotVec(subVec(point, start), delta) / lengthSq)) : 0;
+  return Math.hypot(
+    point.x - (start.x + delta.x * amount),
+    point.y - (start.y + delta.y * amount),
+    point.z - (start.z + delta.z * amount),
+  );
+}
+
 function findMatchingEdge(cad: OcctKernel, shape: ShapeHandle, sourceEdge: ShapeHandle) {
-  let wanted: ReturnType<typeof edgeCurveSample>;
+  let wanted: ReturnType<typeof edgeMatchSample>;
   try {
-    wanted = edgeCurveSample(cad, sourceEdge);
+    wanted = edgeMatchSample(cad, sourceEdge);
   } catch {
     return null;
   }
-  const edges = cad.getSubShapes(shape, "edge");
-  let best: ShapeHandle | null = null;
+  // One wireframe for the whole solid. Sampling every edge curve here was a
+  // separate CAD call per edge, which is what made the next click wait.
+  const wire = cad.wireframe(shape, 0.35);
+  let bestHash = 0;
   let bestDistance = 0.4;
-  for (const edge of edges) {
-    let sample: ReturnType<typeof edgeCurveSample>;
-    try {
-      sample = edgeCurveSample(cad, edge);
-    } catch {
-      continue;
+  for (let index = 0; index + 2 < wire.edgeGroups.length; index += 3) {
+    const start = wire.edgeGroups[index];
+    const count = wire.edgeGroups[index + 1];
+    const hash = wire.edgeGroups[index + 2];
+    if (count < 6) continue;
+    let distance = Number.POSITIVE_INFINITY;
+    let tangentAlign = 0;
+    for (let offset = start; offset + 5 < start + count; offset += 3) {
+      const a = { x: wire.points[offset], y: wire.points[offset + 1], z: wire.points[offset + 2] };
+      const b = { x: wire.points[offset + 3], y: wire.points[offset + 4], z: wire.points[offset + 5] };
+      distance = Math.min(distance, pointSegmentDistance(wanted.sample, a, b));
+      const tangent = unitVec(subVec(b, a));
+      tangentAlign = Math.max(tangentAlign, Math.abs(dotVec(tangent, wanted.tangent)));
     }
-    const distance = Math.hypot(
-      sample.sample.x - wanted.sample.x,
-      sample.sample.y - wanted.sample.y,
-      sample.sample.z - wanted.sample.z,
-    );
-    const alignment = Math.abs(dotVec(sample.tangent, wanted.tangent));
-    if (distance < bestDistance && alignment > 0.97) {
-      best = edge;
+    if (distance < bestDistance && tangentAlign > 0.97) {
+      bestHash = hash;
       bestDistance = distance;
     }
   }
-  return best;
+  if (!bestHash) return null;
+  const edges = cad.getSubShapes(shape, "edge");
+  return edges.find((edge) => cad.hashCode(edge, HASH_UPPER_BOUND) === bestHash) ?? null;
 }
 
 function recipeMatches(request: { kind: CadModifierKind; amount: number; chamferAngle: number }) {
@@ -1030,6 +1063,46 @@ export function cutConcaveCorners(
   } finally {
     releaseHandles(cad, index.faces);
   }
+}
+
+function applyRemovingTreatment(
+  cad: OcctKernel,
+  solid: ShapeHandle,
+  edges: ShapeHandle[],
+  treat: (target: ShapeHandle, selected: ShapeHandle[]) => ShapeHandle,
+  kind: CadModifierKind,
+  amount: number,
+  chamferAngle: number,
+) {
+  if (edges.length === 0) return cad.copy(solid);
+  const before = shapeVolume(cad, solid);
+  try {
+    const treated = treat(solid, edges);
+    // A convex fillet or chamfer removes material. That is the common click,
+    // and it does not need a face map of the whole solid.
+    if (shapeVolume(cad, treated) + 1e-3 < before) return singleSolid(cad, treated);
+    if (treated !== solid) {
+      try { cad.release(treated); } catch { /* The filled corner is discarded. */ }
+    }
+  } catch {
+    // A concave corner can reject the direct fillet. Classify it below.
+  }
+  const { concave, convex } = classifyCornerEdges(cad, solid, edges);
+  let component = convex.length > 0 || concave.length === 0
+    ? treat(solid, convex.length > 0 ? convex : edges)
+    : cad.copy(solid);
+  if (concave.length > 0) {
+    component = cutConcaveCorners(
+      cad,
+      singleSolid(cad, component),
+      solid,
+      concave,
+      kind,
+      amount,
+      chamferAngle,
+    );
+  }
+  return singleSolid(cad, component);
 }
 
 function toClassificationInput(edge: CollectedCadEdgeGeometry) {
@@ -1148,6 +1221,12 @@ function tessellationOptions(quality: CadModifierQuality, amount: number) {
   if (quality === "ultra") return { linearDeflection: Math.max(0.012, amount / 20), angularDeflection: 0.06 };
   if (quality === "fine") return { linearDeflection: Math.max(0.025, amount / 12), angularDeflection: 0.1 };
   return { linearDeflection: Math.max(0.055, amount / 7), angularDeflection: 0.2 };
+}
+
+function previewTessellationOptions(amount: number) {
+  // Interactive preview only. Flats stay flat; the new fillet stays visibly round
+  // without re-faceting every existing curve at the finer apply tolerance.
+  return { linearDeflection: Math.max(0.16, amount / 4), angularDeflection: 0.32 };
 }
 
 function copyCadMesh(mesh: { positions: Float32Array; normals: Float32Array; indices: Uint32Array; triangleCount: number }) {
@@ -1516,6 +1595,10 @@ async function handleCadModifierRequest(request: CadModifierWorkerRequest) {
       post({ type: "disposed", requestId: request.requestId });
       return;
     }
+    if (request.type === "warmup") {
+      post({ type: "warmup", requestId: request.requestId });
+      return;
+    }
     if (request.type === "prepare") {
       releaseSession(activeCad);
       sourcePartCount = request.parts.length;
@@ -1642,25 +1725,15 @@ async function handleCadModifierRequest(request: CadModifierWorkerRequest) {
                   ? activeCad.chamfer(target, edges, request.amount)
                   : activeCad.chamferDistAngle(target, edges, request.amount, request.chamferAngle)
           );
-          const applyToSolid = (solid: ShapeHandle, edges: ShapeHandle[]) => {
-            if (edges.length === 0) return activeCad.copy(solid);
-            const { concave, convex } = classifyCornerEdges(activeCad, solid, edges);
-            let component = convex.length > 0 || concave.length === 0
-              ? treat(solid, convex.length > 0 ? convex : edges)
-              : activeCad.copy(solid);
-            if (concave.length > 0) {
-              component = cutConcaveCorners(
-                activeCad,
-                singleSolid(activeCad, component),
-                solid,
-                concave,
-                request.kind,
-                request.amount,
-                request.chamferAngle,
-              );
-            }
-            return singleSolid(activeCad, component);
-          };
+          const applyToSolid = (solid: ShapeHandle, edges: ShapeHandle[]) => applyRemovingTreatment(
+            activeCad,
+            solid,
+            edges,
+            treat,
+            request.kind,
+            request.amount,
+            request.chamferAngle,
+          );
           if (solids.length <= 1) {
             componentResults.push(applyToSolid(solids[0] ?? host, matched));
           } else {
@@ -1705,27 +1778,19 @@ async function handleCadModifierRequest(request: CadModifierWorkerRequest) {
                 ? activeCad.chamfer(target, edges, request.amount)
                 : activeCad.chamferDistAngle(target, edges, request.amount, request.chamferAngle)
         );
-        const { concave, convex } = classifyCornerEdges(activeCad, solid, componentEdges);
-        let component = convex.length > 0 || concave.length === 0
-          ? treat(solid, convex.length > 0 ? convex : componentEdges)
-          : activeCad.copy(solid);
-        if (concave.length > 0) {
-          // OCCT fills a concave hole corner. Cut that corner out so the opening stays.
-          component = cutConcaveCorners(
-            activeCad,
-            singleSolid(activeCad, component),
-            solid,
-            concave,
-            request.kind,
-            request.amount,
-            request.chamferAngle,
-          );
-        }
-        componentResults.push(singleSolid(activeCad, component));
+        componentResults.push(applyRemovingTreatment(
+          activeCad,
+          solid,
+          componentEdges,
+          treat,
+          request.kind,
+          request.amount,
+          request.chamferAngle,
+        ));
       }
       }
       result = componentResults.length === 1 ? componentResults[0] : activeCad.makeCompound(componentResults);
-      const options = tessellationOptions("standard", request.amount);
+      const options = previewTessellationOptions(request.amount);
       let mesh: ReturnType<typeof copyCadMesh>;
       try {
         const probed = activeCad.tessellate(result, options);

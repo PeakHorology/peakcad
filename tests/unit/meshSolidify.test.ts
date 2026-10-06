@@ -88,4 +88,33 @@ describe("mesh solidify", () => {
     expect(kernel.getSubShapes(solid, "face").length).toBeLessThanOrEqual(12);
     expect(Math.abs(kernel.getVolume(solid))).toBeCloseTo(width * depth * height, -1);
   });
+
+  it("keeps merged flat faces when the mesh also has curved triangles", () => {
+    const positions: number[] = [];
+    const indices: number[] = [];
+    const width = 30;
+    const depth = 16;
+    const height = 10;
+    gridFace({ x: 0, y: 0, z: height }, { x: width, y: 0, z: 0 }, { x: 0, y: depth, z: 0 }, 6, positions, indices);
+    gridFace({ x: 0, y: 0, z: 0 }, { x: 0, y: depth, z: 0 }, { x: width, y: 0, z: 0 }, 6, positions, indices);
+    gridFace({ x: 0, y: 0, z: 0 }, { x: width, y: 0, z: 0 }, { x: 0, y: 0, z: height }, 6, positions, indices);
+    gridFace({ x: 0, y: depth, z: 0 }, { x: 0, y: 0, z: height }, { x: width, y: 0, z: 0 }, 6, positions, indices);
+    gridFace({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: height }, { x: 0, y: depth, z: 0 }, 6, positions, indices);
+    gridFace({ x: width, y: 0, z: 0 }, { x: 0, y: depth, z: 0 }, { x: 0, y: 0, z: height }, 6, positions, indices);
+    const curved = kernel.tessellate(kernel.makeCylinder(6, 14), { linearDeflection: 0.35, angularDeflection: 0.45 });
+    const offset = positions.length / 3;
+    for (let index = 0; index < curved.positions.length; index += 3) {
+      positions.push(curved.positions[index] + 80, curved.positions[index + 1], curved.positions[index + 2]);
+    }
+    for (const index of curved.indices) indices.push(index + offset);
+    const solid = reconstructSolid(kernel, {
+      hole: false,
+      positions: Float32Array.from(positions),
+      indices: Uint32Array.from(indices),
+    });
+    const faces = kernel.getSubShapes(solid, "face").length;
+    const triangles = indices.length / 3;
+    expect(faces).toBeLessThan(triangles * 0.75);
+    expect(faces).toBeGreaterThan(0);
+  });
 });

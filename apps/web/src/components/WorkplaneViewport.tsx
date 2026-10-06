@@ -12,6 +12,7 @@ import { AlignOverlay, CircularPatternOverlay, MirrorOverlay, type AlignOverlayS
 import { ShapeInspector, SnapGridControl, type ShapeInspectorUpdateOptions } from "@/components/workplane/ShapeInspector";
 import { ToolbarDropToWorkplaneIcon, ToolbarSnapGridIcon } from "@/components/icons";
 import { objectSnapTolerance, snapAabbFromShape, snapMovingAabb, unionSnapAabbs, type ObjectSnapResult } from "@/lib/objectSnap";
+import { buildPickBvh, raycastPickBvh, type PickBvh, type PickTriangle } from "@/lib/meshPickBvh";
 import { shapeYawDegrees } from "@/lib/shapeBounds";
 import {
   antipodeThroughAxis,
@@ -371,6 +372,30 @@ function markShadowsDirty(state: ThreeState) {
   state.keyLight.shadow.needsUpdate = true;
 }
 
+function hideDragShadows(drag: DragState) {
+  if (drag.shadowsHidden) return;
+  const casters: THREE.Mesh[] = [];
+  drag.items.forEach((item) => {
+    item.visual?.traverse((child) => {
+      if (child instanceof THREE.Mesh && child.castShadow) {
+        child.castShadow = false;
+        casters.push(child);
+      }
+    });
+  });
+  drag.shadowCasters = casters;
+  drag.shadowsHidden = true;
+}
+
+function restoreDragShadows(state: ThreeState | null, drag: DragState) {
+  drag.shadowCasters?.forEach((mesh) => {
+    mesh.castShadow = true;
+  });
+  drag.shadowCasters = undefined;
+  drag.shadowsHidden = false;
+  if (state) markShadowsDirty(state);
+}
+
 export type CaptureSceneImageOptions = {
   /** When true (default), hide workplane/helpers for model-only captures (MCP / automation). */
   hideOverlays?: boolean;
@@ -480,6 +505,8 @@ export type DragState = {
   primaryStartX: number;
   primaryStartZ: number;
   items: DragItem[];
+  shadowsHidden?: boolean;
+  shadowCasters?: THREE.Mesh[];
 };
 
 export type MarqueeState = {
@@ -972,6 +999,73 @@ function rulerPointAlongRay(state: ThreeState, world: THREE.Vector3) {
   return Math.max(0, world.clone().sub(state.camera.position).dot(state.raycaster.ray.direction));
 }
 
+const PICK_INDEX_TRIANGLE_MIN = 800;
+const geometryPickIndex = new WeakMap<THREE.BufferGeometry, PickBvh | null>();
+
+function meshIsDoubleSided(mesh: THREE.Mesh) {
+  const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+  return materials.some((material) => material.side === THREE.DoubleSide);
+}
+
+function geometryTriangleCount(geometry: THREE.BufferGeometry) {
+  const position = geometry.getAttribute("position");
+  if (!position) return 0;
+  const index = geometry.getIndex();
+  return Math.floor((index ? index.count : position.count) / 3);
+}
+
+function pickIndexForGeometry(geometry: THREE.BufferGeometry) {
+  const cached = geometryPickIndex.get(geometry);
+  if (cached !== undefined) return cached;
+  const position = geometry.getAttribute("position");
+  if (!position) {
+    geometryPickIndex.set(geometry, null);
+    return null;
+  }
+  const index = geometry.getIndex();
+  const count = geometryTriangleCount(geometry);
+  const triangles = new Array<PickTriangle>(count);
+  for (let triangle = 0; triangle < count; triangle += 1) {
+    const a = index ? index.getX(triangle * 3) : triangle * 3;
+    const b = index ? index.getX(triangle * 3 + 1) : triangle * 3 + 1;
+    const c = index ? index.getX(triangle * 3 + 2) : triangle * 3 + 2;
+    triangles[triangle] = {
+      ax: position.getX(a), ay: position.getY(a), az: position.getZ(a),
+      bx: position.getX(b), by: position.getY(b), bz: position.getZ(b),
+      cx: position.getX(c), cy: position.getY(c), cz: position.getZ(c),
+    };
+  }
+  const tree = buildPickBvh(triangles);
+  geometryPickIndex.set(geometry, tree);
+  return tree;
+}
+
+const pickInverse = new THREE.Matrix4();
+const pickOrigin = new THREE.Vector3();
+const pickDirection = new THREE.Vector3();
+const pickPoint = new THREE.Vector3();
+const pickNormal = new THREE.Vector3();
+
+function raycastIndexedMesh(mesh: THREE.Mesh, raycaster: THREE.Raycaster, hits: THREE.Intersection[]) {
+  const tree = pickIndexForGeometry(mesh.geometry);
+  if (!tree) return;
+  pickInverse.copy(mesh.matrixWorld).invert();
+  pickOrigin.copy(raycaster.ray.origin).applyMatrix4(pickInverse);
+  pickDirection.copy(raycaster.ray.direction).transformDirection(pickInverse);
+  const hit = raycastPickBvh(tree, pickOrigin, pickDirection, meshIsDoubleSided(mesh));
+  if (!hit) return;
+  pickPoint.set(hit.x, hit.y, hit.z).applyMatrix4(mesh.matrixWorld);
+  const distance = raycaster.ray.origin.distanceTo(pickPoint);
+  if (distance < raycaster.near || distance > raycaster.far) return;
+  pickNormal.set(hit.nx, hit.ny, hit.nz).transformDirection(mesh.matrixWorld).normalize();
+  hits.push({
+    distance,
+    point: pickPoint.clone(),
+    object: mesh,
+    face: { a: 0, b: 0, c: 0, normal: pickNormal.clone(), materialIndex: 0 },
+  });
+}
+
 function preciseMeshHits(state: ThreeState, targets: THREE.Object3D[]) {
   const hits: THREE.Intersection[] = [];
   const raycastMesh = THREE.Mesh.prototype.raycast;
@@ -981,6 +1075,10 @@ function preciseMeshHits(state: ThreeState, targets: THREE.Object3D[]) {
       // Overlays opt out with an empty raycast. Dense imports otherwise answer with
       // their bounding box, which selects the larger shape and blocks empty clicks.
       if (child.raycast.length === 0) return;
+      if (geometryTriangleCount(child.geometry) >= PICK_INDEX_TRIANGLE_MIN) {
+        raycastIndexedMesh(child, state.raycaster, hits);
+        return;
+      }
       raycastMesh.call(child, state.raycaster, hits);
     });
   });
@@ -2333,6 +2431,9 @@ export function WorkplaneViewport({
   const onSceneReadyRef = useRef(onSceneReady);
   onSceneReadyRef.current = onSceneReady;
   const orbitingRef = useRef(false);
+  const shapeHoverIdRef = useRef<string | null>(null);
+  const shapeHoverFrameRef = useRef<number | null>(null);
+  const shapeHoverPointRef = useRef({ x: 0, y: 0 });
   const cameraOverlaysHiddenRef = useRef(false);
   const [measurementsConcealed, setMeasurementsConcealed] = useState(false);
   const syncMeasurementsRef = useRef<(() => void) | null>(null);
@@ -2461,6 +2562,7 @@ export function WorkplaneViewport({
   const cancelActiveInteraction = useCallback(
     (selectionIds = selectedIdsRef.current) => {
       const hadInteraction = Boolean(transformRef.current || dragRef.current || marqueeRef.current);
+      const drag = dragRef.current;
       transformRef.current = null;
       dragRef.current = null;
       marqueeRef.current = null;
@@ -2471,6 +2573,7 @@ export function WorkplaneViewport({
       setPinnedRotationWheelView(null);
       setRotationReadout(null);
       const state = threeRef.current;
+      if (drag?.shadowsHidden) restoreDragShadows(state, drag);
       if (state) {
         rebuildShapes(state, shapesRef.current, renderSelectionIds(selectionIds));
         setSelectionHelpersVisible(state, true);
@@ -2791,6 +2894,10 @@ export function WorkplaneViewport({
     }
     selectedIdsRef.current = selectedIds;
     rebuildShapes(threeRef.current, shapesRef.current, renderSelectionIds(selectedIds), !transformRef.current && !dragRef.current);
+    if (shapeHoverIdRef.current && selectedIds.includes(shapeHoverIdRef.current)) {
+      shapeHoverIdRef.current = null;
+    }
+    if (threeRef.current) showShapeHoverOutline(threeRef.current, shapeHoverIdRef.current);
     refreshDragPreviewObjects(threeRef.current, dragRef.current);
     if (threeRef.current) {
       syncTransformOverlay(
@@ -4766,6 +4873,28 @@ export function WorkplaneViewport({
     ],
   );
 
+  const scheduleShapeHover = useCallback((clientX: number, clientY: number) => {
+    shapeHoverPointRef.current = { x: clientX, y: clientY };
+    if (shapeHoverFrameRef.current !== null) return;
+    shapeHoverFrameRef.current = window.requestAnimationFrame(() => {
+      shapeHoverFrameRef.current = null;
+      const state = threeRef.current;
+      const point = shapeHoverPointRef.current;
+      if (!state || orbitingRef.current || modifierActiveRef.current || rulerModeRef.current || rulerMoveModeRef.current || sketchFacePickModeRef.current || placementRulerModeRef.current || dragRef.current || marqueeRef.current || transformRef.current) {
+        if (shapeHoverIdRef.current) {
+          shapeHoverIdRef.current = null;
+          if (state) showShapeHoverOutline(state, null);
+        }
+        return;
+      }
+      const id = pickShapesAt(point.x, point.y)[0] ?? null;
+      const next = id && !selectedIdsRef.current.includes(id) ? id : null;
+      if (next === shapeHoverIdRef.current) return;
+      shapeHoverIdRef.current = next;
+      showShapeHoverOutline(state, next);
+    });
+  }, [pickShapesAt]);
+
   const handlePointerMove = useCallback(
     (event: ReactPointerEvent<HTMLDivElement>) => {
       if (faceSnapActiveRef.current) {
@@ -4787,6 +4916,12 @@ export function WorkplaneViewport({
         return;
       }
       if (rulerMoveModeRef.current) return;
+      if (!transformRef.current && !marqueeRef.current && !dragRef.current) {
+        scheduleShapeHover(event.clientX, event.clientY);
+      } else if (shapeHoverIdRef.current && threeRef.current) {
+        shapeHoverIdRef.current = null;
+        showShapeHoverOutline(threeRef.current, null);
+      }
       const transform = transformRef.current;
       if (transform) {
         updateTransform(event.clientX, event.clientY, event.shiftKey, event.altKey);
@@ -4881,6 +5016,10 @@ export function WorkplaneViewport({
         item.nextZ = item.startZ + deltaZ;
         if (threeRef.current) applyDragItemPreview(threeRef.current, item);
       });
+      if (!drag.shadowsHidden && Math.hypot(deltaX, deltaZ) > 0.4) {
+        hideDragShadows(drag);
+        if (threeRef.current) markShadowsDirty(threeRef.current);
+      }
       if (threeRef.current) {
         const previewShapes = previewShapesForDrag(shapesRef.current, drag);
         updateSelectedGroundFootprintPreviews(threeRef.current, drag);
@@ -4900,11 +5039,19 @@ export function WorkplaneViewport({
         threeRef.current.needsRender = true;
       }
     },
-    [setMarqueeFromState, toPlanePointAtY, updateModifierEdgeHover, updateRulerHover, updateSketchFaceHover, updateTransform],
+    [scheduleShapeHover, setMarqueeFromState, toPlanePointAtY, updateModifierEdgeHover, updateRulerHover, updateSketchFaceHover, updateTransform],
   );
 
   const handlePointerLeave = useCallback(() => {
     clearFaceSnapHover();
+    if (shapeHoverFrameRef.current !== null) {
+      window.cancelAnimationFrame(shapeHoverFrameRef.current);
+      shapeHoverFrameRef.current = null;
+    }
+    if (shapeHoverIdRef.current && threeRef.current) {
+      shapeHoverIdRef.current = null;
+      showShapeHoverOutline(threeRef.current, null);
+    }
     if (modifierActiveRef.current) clearModifierEdgeHover();
     if (sketchFacePickModeRef.current) clearSketchFaceHover();
   }, [clearModifierEdgeHover, clearSketchFaceHover]);
@@ -5034,6 +5181,7 @@ export function WorkplaneViewport({
 
       dragRef.current = null;
       setObjectSnapGuide(null);
+      if (drag.shadowsHidden && state) restoreDragShadows(state, drag);
       if (state) {
         // A moved shape triggers the shapes effect, which rebuilds this preview.
         // Running it here as well makes cylinder/hole CSG execute twice on release.
@@ -6560,8 +6708,8 @@ function shapeRenderFingerprint(shape: WorkplaneShape, showEdges: boolean) {
   return `${projectShapesFingerprint([shape])}|edges:${showEdges ? 1 : 0}${shapeTessellationFingerprint(shape, quality)}`;
 }
 
-/** Pose lives on the Object3D. A move or turn must not rebuild the mesh. */
-function shapeGeometryFingerprint(shape: WorkplaneShape, showEdges: boolean) {
+/** Pose lives on the Object3D. Selection only changes the outline, not the mesh. */
+function shapeGeometryFingerprint(shape: WorkplaneShape) {
   return shapeRenderFingerprint({
     ...shape,
     x: 0,
@@ -6573,7 +6721,7 @@ function shapeGeometryFingerprint(shape: WorkplaneShape, showEdges: boolean) {
     mirrorX: undefined,
     mirrorY: undefined,
     mirrorZ: undefined,
-  }, showEdges);
+  }, false);
 }
 
 function applyShapePose(object: THREE.Object3D, shape: WorkplaneShape) {
@@ -6605,10 +6753,12 @@ function rebuildShapes(state: ThreeState | null, shapes: WorkplaneShape[], selec
   const keepIds = new Set<string>();
   visibleShapes.forEach((shape) => {
     const showEdges = selected.has(shape.id);
-    const fingerprint = shapeGeometryFingerprint(shape, showEdges);
+    const fingerprint = shapeGeometryFingerprint(shape);
     const existing = existingById.get(shape.id);
     if (existing && existing.userData.renderFingerprint === fingerprint) {
       applyShapePose(existing, shape);
+      existing.userData.showEdges = showEdges;
+      syncSelectionOutline(existing, showEdges);
       keepIds.add(shape.id);
       return;
     }
@@ -6617,10 +6767,12 @@ function rebuildShapes(state: ThreeState | null, shapes: WorkplaneShape[], selec
       disposeObject(existing);
       existingById.delete(shape.id);
     }
-    const object = createShapeObject(shape, showEdges, () => {
+    const object = createShapeObject(shape, false, () => {
       state.needsRender = true;
     });
     object.userData.renderFingerprint = fingerprint;
+    object.userData.showEdges = showEdges;
+    syncSelectionOutline(object, showEdges);
     state.shapeLayer.add(object);
     keepIds.add(shape.id);
   });
@@ -6747,68 +6899,141 @@ function applyXrayClipping(state: ThreeState | null, enabled: boolean, height: n
   syncXrayHelper(state, enabled, height);
 }
 
-function modifierEdgeMaterialStyle(active: boolean, hovered: boolean, previewActive: boolean) {
-  return {
-    color: active ? (hovered ? "#ffbf45" : "#ff8a1d") : hovered ? "#84edff" : "#17b7e5",
-    // Stay fully orange after the preview mesh arrives. Fading the selection made a
-    // second fillet group look unselected once its preview finished.
-    opacity: active || hovered ? 1 : 0.72,
-    linewidth: active || hovered ? 3 : 1,
-    renderOrder: hovered ? 1005 : active ? (previewActive ? 1004 : 1002) : 1001,
-  };
+const MODIFIER_EDGE_IDLE = new THREE.Color("#17b7e5");
+const MODIFIER_EDGE_HOVER = new THREE.Color("#84edff");
+const MODIFIER_EDGE_SELECTED = new THREE.Color("#ff8a1d");
+const MODIFIER_EDGE_SELECTED_HOVER = new THREE.Color("#ffbf45");
+const MODIFIER_EDGE_PAPER = new THREE.Color("#f3f0e8");
+
+type ModifierEdgeRange = { start: number; count: number };
+
+type ModifierEdgeBatch = {
+  source: CadModifierEdge[];
+  ranges: Map<number, ModifierEdgeRange>;
+  positions: Float32Array;
+  selected: Set<number>;
+  lines: THREE.LineSegments;
+  hover: THREE.LineSegments;
+};
+
+function modifierEdgeColor(active: boolean, target: THREE.Color) {
+  if (active) return target.copy(MODIFIER_EDGE_SELECTED);
+  return target.copy(MODIFIER_EDGE_IDLE).lerp(MODIFIER_EDGE_PAPER, 0.28);
 }
 
-function modifierEdgeAppearance(line: THREE.Line, active: boolean, hovered: boolean, previewActive: boolean) {
-  const style = modifierEdgeMaterialStyle(active, hovered, previewActive);
-  const material = line.material as THREE.LineBasicMaterial;
-  material.color.set(style.color);
-  material.opacity = style.opacity;
-  material.linewidth = style.linewidth;
-  line.renderOrder = style.renderOrder;
+function paintModifierEdgeColors(batch: ModifierEdgeBatch, selected: Set<number>) {
+  const colors = batch.lines.geometry.getAttribute("color") as THREE.BufferAttribute;
+  const array = colors.array as Float32Array;
+  const color = new THREE.Color();
+  batch.ranges.forEach((range, id) => {
+    modifierEdgeColor(selected.has(id), color);
+    for (let vertex = range.start; vertex < range.start + range.count; vertex += 1) {
+      const offset = vertex * 3;
+      array[offset] = color.r;
+      array[offset + 1] = color.g;
+      array[offset + 2] = color.b;
+    }
+  });
+  colors.needsUpdate = true;
+  batch.selected = selected;
 }
 
-function rebuildModifierEdges(state: ThreeState | null, edges: CadModifierEdge[], selectedIds: number[], previewActive = false, hoverId: number | null = null) {
+function showModifierEdgeHover(batch: ModifierEdgeBatch, hoverId: number | null) {
+  const range = hoverId === null ? undefined : batch.ranges.get(hoverId);
+  const geometry = batch.hover.geometry;
+  const position = geometry.getAttribute("position") as THREE.BufferAttribute;
+  const material = batch.hover.material as THREE.LineBasicMaterial;
+  if (!range || range.count < 2) {
+    batch.hover.visible = false;
+    return;
+  }
+  const destination = position.array as Float32Array;
+  destination.set(batch.positions.subarray(range.start * 3, (range.start + range.count) * 3));
+  position.needsUpdate = true;
+  geometry.setDrawRange(0, range.count);
+  material.color.copy(hoverId !== null && batch.selected.has(hoverId) ? MODIFIER_EDGE_SELECTED_HOVER : MODIFIER_EDGE_HOVER);
+  batch.hover.visible = true;
+}
+
+function rebuildModifierEdges(state: ThreeState | null, edges: CadModifierEdge[], selectedIds: number[], _previewActive = false, hoverId: number | null = null) {
   if (!state) return;
-  const selected = new Set(selectedIds);
   const drawable = edges.filter((edge) => edge.points.length >= 6);
+  const existing = state.modifierLayer.userData.modifierEdgeBatch as ModifierEdgeBatch | undefined;
+  const selected = new Set(selectedIds);
 
-  // Moving the pointer across a part only changes colour and draw order. Disposing and rebuilding
-  // every edge geometry for that made hovering a filleted part with hundreds of edges allocate a
-  // fresh BufferGeometry per edge per mouse move. Reuse the lines whenever the edge data is the
-  // same array we built them from, so stale points can never be shown.
-  const built = state.modifierLayer.userData.modifierEdgeSource as CadModifierEdge[] | undefined;
-  if (built === edges && state.modifierLayer.children.length === drawable.length) {
-    const byId = new Map<number, THREE.Line>();
-    for (const child of state.modifierLayer.children) {
-      if (child instanceof THREE.Line && typeof child.userData.modifierEdgeId === "number") {
-        byId.set(child.userData.modifierEdgeId, child);
-      }
-    }
-    if (drawable.every((edge) => byId.has(edge.id))) {
-      for (const edge of drawable) {
-        modifierEdgeAppearance(byId.get(edge.id)!, selected.has(edge.id), hoverId === edge.id, previewActive);
-      }
-      state.needsRender = true;
-      return;
-    }
+  if (existing && existing.source === edges) {
+    const sameSelection = existing.selected.size === selected.size && selectedIds.every((id) => existing.selected.has(id));
+    if (!sameSelection) paintModifierEdgeColors(existing, selected);
+    showModifierEdgeHover(existing, hoverId);
+    state.needsRender = true;
+    return;
   }
 
   disposeChildren(state.modifierLayer);
-  state.modifierLayer.userData.modifierEdgeSource = edges;
-  edges.forEach((edge) => {
-    if (edge.points.length < 6) return;
-    const geometry = new THREE.BufferGeometry();
-    geometry.setAttribute("position", new THREE.Float32BufferAttribute(edge.points, 3));
-    const material = new THREE.LineBasicMaterial({
-      depthTest: false,
-      depthWrite: false,
-      transparent: true,
-    });
-    const line = new THREE.Line(geometry, material);
-    line.userData.modifierEdgeId = edge.id;
-    modifierEdgeAppearance(line, selected.has(edge.id), hoverId === edge.id, previewActive);
-    state.modifierLayer.add(line);
+  if (drawable.length === 0) {
+    delete state.modifierLayer.userData.modifierEdgeBatch;
+    state.needsRender = true;
+    return;
+  }
+
+  let vertexCount = 0;
+  let longest = 0;
+  drawable.forEach((edge) => {
+    const segments = Math.floor(edge.points.length / 3) - 1;
+    const vertices = Math.max(0, segments) * 2;
+    vertexCount += vertices;
+    longest = Math.max(longest, vertices);
   });
+  const positions = new Float32Array(vertexCount * 3);
+  const colors = new Float32Array(vertexCount * 3);
+  const ranges = new Map<number, ModifierEdgeRange>();
+  let cursor = 0;
+  drawable.forEach((edge) => {
+    const start = cursor;
+    const count = Math.floor(edge.points.length / 3);
+    for (let index = 0; index + 1 < count; index += 1) {
+      const from = index * 3;
+      positions[cursor * 3] = edge.points[from];
+      positions[cursor * 3 + 1] = edge.points[from + 1];
+      positions[cursor * 3 + 2] = edge.points[from + 2];
+      cursor += 1;
+      positions[cursor * 3] = edge.points[from + 3];
+      positions[cursor * 3 + 1] = edge.points[from + 4];
+      positions[cursor * 3 + 2] = edge.points[from + 5];
+      cursor += 1;
+    }
+    ranges.set(edge.id, { start, count: cursor - start });
+  });
+
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+  const lines = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({
+    vertexColors: true,
+    depthTest: false,
+    depthWrite: false,
+    transparent: true,
+  }));
+  lines.renderOrder = 1002;
+  lines.frustumCulled = false;
+
+  const hoverGeometry = new THREE.BufferGeometry();
+  hoverGeometry.setAttribute("position", new THREE.BufferAttribute(new Float32Array(Math.max(2, longest) * 3), 3));
+  const hover = new THREE.LineSegments(hoverGeometry, new THREE.LineBasicMaterial({
+    color: MODIFIER_EDGE_HOVER,
+    depthTest: false,
+    depthWrite: false,
+    transparent: true,
+  }));
+  hover.renderOrder = 1005;
+  hover.frustumCulled = false;
+  hover.visible = false;
+
+  const batch: ModifierEdgeBatch = { source: edges, ranges, positions, selected, lines, hover };
+  paintModifierEdgeColors(batch, selected);
+  showModifierEdgeHover(batch, hoverId);
+  state.modifierLayer.add(lines, hover);
+  state.modifierLayer.userData.modifierEdgeBatch = batch;
   applyXrayClipping(state, state.xrayEnabled, state.xrayHeight);
   state.needsRender = true;
 }
@@ -7537,6 +7762,92 @@ function syncMirrorOverlay(
   setOverlay(next);
 }
 
+const SHAPE_HOVER_OUTLINE = "ShapeHoverOutline";
+const shapeHoverEdgeCache = new WeakMap<THREE.BufferGeometry, THREE.EdgesGeometry>();
+const shapeHoverMaterial = new THREE.LineBasicMaterial({
+  color: "#f0d59a",
+  transparent: true,
+  opacity: 0.95,
+  depthTest: true,
+  depthWrite: false,
+  polygonOffset: true,
+  polygonOffsetFactor: -2,
+  polygonOffsetUnits: -2,
+});
+
+function clearShapeHoverOutlines(root: THREE.Object3D) {
+  const stale: THREE.Object3D[] = [];
+  root.traverse((child) => {
+    if (child.name === SHAPE_HOVER_OUTLINE) stale.push(child);
+  });
+  stale.forEach((child) => child.parent?.remove(child));
+}
+
+function syncSelectionOutline(object: THREE.Object3D, selected: boolean) {
+  const stale: THREE.Object3D[] = [];
+  object.traverse((child) => {
+    if (child.name === "ShapeSelectionOutline") stale.push(child);
+  });
+  stale.forEach((child) => child.parent?.remove(child));
+  if (!selected) return;
+  object.traverse((child) => {
+    if (!(child instanceof THREE.Mesh) || child.userData.cutPreview || child.raycast.length === 0) return;
+    let edges = shapeHoverEdgeCache.get(child.geometry);
+    if (!edges) {
+      edges = new THREE.EdgesGeometry(child.geometry, 24);
+      edges.userData.cached = true;
+      shapeHoverEdgeCache.set(child.geometry, edges);
+    }
+    const lines = new THREE.LineSegments(edges, shapeSelectionMaterial);
+    lines.name = "ShapeSelectionOutline";
+    lines.raycast = () => undefined;
+    lines.position.copy(child.position);
+    lines.rotation.copy(child.rotation);
+    lines.scale.copy(child.scale);
+    lines.renderOrder = 3;
+    child.parent?.add(lines);
+  });
+}
+
+const shapeSelectionMaterial = new THREE.LineBasicMaterial({
+  color: "#00aeea",
+  transparent: true,
+  opacity: 0.9,
+  depthTest: true,
+  depthWrite: false,
+  polygonOffset: true,
+  polygonOffsetFactor: -2,
+  polygonOffsetUnits: -2,
+});
+
+function showShapeHoverOutline(state: ThreeState, shapeId: string | null) {
+  state.shapeLayer.children.forEach((child) => clearShapeHoverOutlines(child));
+  if (!shapeId) {
+    state.needsRender = true;
+    return;
+  }
+  const object = findShapeObject(state, shapeId);
+  if (!object) return;
+  object.traverse((child) => {
+    if (!(child instanceof THREE.Mesh) || child.userData.cutPreview || child.raycast.length === 0) return;
+    let edges = shapeHoverEdgeCache.get(child.geometry);
+    if (!edges) {
+      edges = new THREE.EdgesGeometry(child.geometry, 24);
+      edges.userData.cached = true;
+      shapeHoverEdgeCache.set(child.geometry, edges);
+    }
+    const lines = new THREE.LineSegments(edges, shapeHoverMaterial);
+    lines.name = SHAPE_HOVER_OUTLINE;
+    lines.raycast = () => undefined;
+    lines.position.copy(child.position);
+    lines.rotation.copy(child.rotation);
+    lines.scale.copy(child.scale);
+    lines.renderOrder = 4;
+    child.parent?.add(lines);
+  });
+  state.needsRender = true;
+}
+
 function findShapeObject(state: ThreeState, id: string) {
   return state.shapeLayer.children.find((child) => child.userData.shapeId === id) ?? null;
 }
@@ -7996,7 +8307,7 @@ function createShapeObject(shape: WorkplaneShape, showEdges = false, onTextureRe
         const preserveEdgeSize = preservesEdgeTreatmentSize(shape);
         addMesh(
           group,
-          preserveEdgeSize ? getPreservedImportedMeshGeometry(shape) : getImportedMeshGeometry(shape.importedMesh),
+          preserveEdgeSize ? getPreservedImportedMeshGeometry(shape) : getImportedMeshGeometry(shape.importedMesh, patternGeometryKey(shape)),
           material,
           shape,
           undefined,
@@ -8130,7 +8441,20 @@ function addMesh(
   rotation?: THREE.Euler,
   scale?: THREE.Vector3,
 ) {
-  const prepared = geometry.userData.cached ? geometry : putGeometryOnBase(geometry);
+  let prepared = geometry.userData.cached ? geometry : putGeometryOnBase(geometry);
+  if (!shape.importedMesh) {
+    const key = patternGeometryKey(shape);
+    if (key) {
+      const existing = patternPrimitiveCache.get(key);
+      if (existing && existing !== prepared) {
+        if (!prepared.userData.cached) prepared.dispose();
+        prepared = existing;
+      } else if (!existing) {
+        prepared.userData.cached = true;
+        patternPrimitiveCache.set(key, prepared);
+      }
+    }
+  }
   const mesh = new THREE.Mesh(prepared, material);
   const importedTriangles = shape.importedMesh?.triangleCount ?? 0;
   mesh.castShadow = !shape.hole && !shape.construction && importedTriangles <= hardwareProfile().shadowCasterTriangleLimit;
@@ -8282,9 +8606,35 @@ function setFlatTriangleNormals(geometry: THREE.BufferGeometry) {
   geometry.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
 }
 
-function getImportedMeshCache(mesh: NonNullable<WorkplaneShape["importedMesh"]>) {
+const patternGeometryCache = new Map<string, { geometry: THREE.BufferGeometry; edges: Map<number, THREE.EdgesGeometry> }>();
+const patternPrimitiveCache = new Map<string, THREE.BufferGeometry>();
+
+function patternGeometryKey(shape: WorkplaneShape) {
+  const feature = shape.patternFeature;
+  if (!feature) return null;
+  const mesh = shape.importedMesh;
+  return [
+    feature.sourceId,
+    shape.kind,
+    shape.width,
+    shape.height,
+    shape.depth,
+    shape.radius ?? "",
+    shape.sides ?? "",
+    shape.steps ?? "",
+    mesh?.triangleCount ?? 0,
+    mesh?.positions.length ?? 0,
+  ].join("|");
+}
+
+function getImportedMeshCache(mesh: NonNullable<WorkplaneShape["importedMesh"]>, shareKey?: string | null) {
+  if (shareKey) {
+    const shared = patternGeometryCache.get(shareKey);
+    if (shared) return shared;
+  }
   const cached = importedGeometryCache.get(mesh);
   if (cached) {
+    if (shareKey) patternGeometryCache.set(shareKey, cached);
     return cached;
   }
 
@@ -8304,11 +8654,12 @@ function getImportedMeshCache(mesh: NonNullable<WorkplaneShape["importedMesh"]>)
   geometry.userData.cached = true;
   const next = { geometry, edges: new Map<number, THREE.EdgesGeometry>() };
   importedGeometryCache.set(mesh, next);
+  if (shareKey) patternGeometryCache.set(shareKey, next);
   return next;
 }
 
-function getImportedMeshGeometry(mesh: NonNullable<WorkplaneShape["importedMesh"]>) {
-  return getImportedMeshCache(mesh).geometry;
+function getImportedMeshGeometry(mesh: NonNullable<WorkplaneShape["importedMesh"]>, shareKey?: string | null) {
+  return getImportedMeshCache(mesh, shareKey).geometry;
 }
 
 function getPreservedImportedMeshGeometry(shape: WorkplaneShape) {
@@ -8332,7 +8683,7 @@ function getEdgesGeometry(shape: WorkplaneShape, geometry: THREE.BufferGeometry,
     return new THREE.EdgesGeometry(geometry, threshold);
   }
 
-  const cache = getImportedMeshCache(shape.importedMesh);
+  const cache = getImportedMeshCache(shape.importedMesh, patternGeometryKey(shape));
   const cached = cache.edges.get(threshold);
   if (cached) {
     return cached;

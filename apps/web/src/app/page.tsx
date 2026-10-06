@@ -3,6 +3,8 @@
 import { ArrowLeft, EllipsisVertical, FolderOpen, FolderPlus, Grid3X3, KeyRound, List, Lock, LockOpen, Pencil, Plus, Search, Settings, SlidersHorizontal, Star, Trash2, X } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent as ReactDragEvent } from "react";
 import { SketchForgeEditor, type EditorLeaveGuard } from "@/components/SketchForgeEditor";
+import { preloadCadModifierWorker } from "@/lib/cadModifierPreload";
+import { loadBrepWithOcct } from "@/lib/brepKernel";
 import { IntroCoach } from "@/components/workplane/IntroCoach";
 import { hydrateEditorHistoryState, projectShapesFingerprint, type EditorHistoryEntry } from "@/lib/editorHistory";
 import { DOWNLOAD_FOLDER_STORAGE_KEY } from "@/lib/downloadFile";
@@ -802,6 +804,12 @@ async function serializeProjectForDisk(project: DashboardProject, entry: Project
 
 export default function Home() {
   const [mounted, setMounted] = useState(false);
+  const [startupReady, setStartupReady] = useState(false);
+  const [startupLeaving, setStartupLeaving] = useState(false);
+  const [enteredStudio, setEnteredStudio] = useState(() => {
+    if (typeof window === "undefined") return false;
+    return new URLSearchParams(window.location.search).get("editor") === "1";
+  });
   const [view, setView] = useState<AppView>("dashboard");
   const [editorStarted, setEditorStarted] = useState(false);
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null);
@@ -988,6 +996,19 @@ export default function Home() {
     if (unlockedFolderIdsRef.current.has(project.folderId)) return null;
     return project.folderId;
   };
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      preloadCadModifierWorker(),
+      loadBrepWithOcct().catch(() => undefined),
+    ]).finally(() => {
+      if (!cancelled) setStartupReady(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     applyUiTheme(loadUiTheme());
@@ -2166,6 +2187,33 @@ export default function Home() {
     workspace: Boolean(project.workspace),
     snapGrid: project.snapGrid ?? null,
   }));
+
+  if (!enteredStudio) {
+    return (
+      <main className={`startup-screen${startupLeaving ? " is-leaving" : ""}`}>
+        <div className="startup-grid" aria-hidden="true" />
+        <img className="startup-mark" src="assets/peakcad/peakcad-logo.png" alt="PeakCAD" />
+        <div className="startup-copy">
+          <h1 className="startup-title">PeakCAD</h1>
+          <p className="startup-subtitle">Peak Horology</p>
+          <p className="startup-note">Your designs, your files.</p>
+        </div>
+        <button
+          className="startup-start dashboard-primary"
+          type="button"
+          disabled={!startupReady || startupLeaving}
+          onClick={() => {
+            if (!startupReady || startupLeaving) return;
+            const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+            setStartupLeaving(true);
+            window.setTimeout(() => setEnteredStudio(true), reduceMotion ? 0 : 320);
+          }}
+        >
+          {startupReady ? "Start Modeling" : "Getting ready…"}
+        </button>
+      </main>
+    );
+  }
 
   return (
     <>

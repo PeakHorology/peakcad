@@ -89,6 +89,7 @@ export type CadModifierWorkerRequest =
     }
   | CadThreadPreviewRequest
   | { type: "finalize"; requestId: number }
+  | { type: "warmup"; requestId: number }
   | { type: "dispose"; requestId: number };
 
 export type CadModifierWorkerResponse =
@@ -115,4 +116,5 @@ export type CadModifierWorkerResponse =
     }
   | { type: "previewBrep"; requestId: number; brep: string; componentBreps?: string[] }
   | { type: "disposed"; requestId: number }
+  | { type: "warmup"; requestId: number }
   | { type: "error"; requestId: number; message: string; resetSession?: boolean };
