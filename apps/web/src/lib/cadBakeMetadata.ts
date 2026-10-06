@@ -86,7 +86,7 @@ export function cadModifierPrimitiveForAnalyticBox(shape: WorkplaneShape): CadMo
 
 /** Circular native cylinders as exact OCCT solids so Thread can find cylindrical faces. */
 export function cadModifierPrimitiveForAnalyticCylinder(shape: WorkplaneShape): CadModifierPrimitivePart | null {
-  if (shape.kind !== "cylinder" || shape.groupedShapes?.length || shape.cadBrep) {
+  if (shape.kind !== "cylinder" || shape.groupedShapes?.length || shape.cadBrep || shape.importedMesh) {
     return null;
   }
 
