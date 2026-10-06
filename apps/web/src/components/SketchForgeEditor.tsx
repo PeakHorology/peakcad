@@ -126,6 +126,7 @@ import {
   linearPatternWouldClamp,
   resolveLinearPatternSourceId,
 } from "@/lib/linearPattern";
+import { edgeTreatmentSourceParts } from "@/lib/edgeTreatmentSources";
 import {
   dissolvePatternFeature,
   findPatternSource,
@@ -317,7 +318,7 @@ import { importedShapeFromStl, importExtensionSupported } from "@/lib/stlImport"
 import type { MeshSeatMode } from "@/lib/meshSeatOrientation";
 import { lengthDisplayUnit } from "@/lib/measurementUnits";
 import { importedShapeFrom3mf } from "@/lib/threeMfImport";
-import { to3mf } from "@/lib/threeMfExport";
+import { to3mfForShapes } from "@/lib/threeMfExport";
 import { importedShapeFromSvg, invalidSvgMeshReason } from "@/lib/svgImport";
 import { DEFAULT_SNAP_GRID, normalizeSnapGrid, normalizeWorkspaceSettings } from "@/lib/workplaneSettings";
 import {
@@ -655,6 +656,11 @@ function cadModifierPrimitiveForShape(shape: WorkplaneShape): CadModifierPrimiti
 
 function bakeShapeTransformIntoMesh(shape: WorkplaneShape): WorkplaneShape {
   if (!shapeHasTransformToBake(shape)) {
+    return shape;
+  }
+  // A turned group has to keep its children. Baking the angle into one mesh
+  // deleted them, so Ungroup had nothing left to open.
+  if (shape.groupedShapes?.length) {
     return shape;
   }
 
@@ -1330,6 +1336,7 @@ export function SketchForgeEditor({
     resolve: (message: CadModifierWorkerResponse) => void;
     reject: (error: Error) => void;
     timer: number;
+    mesh?: Extract<CadModifierWorkerResponse, { type: "preview" }>;
   }>());
   const cadModifierRequestRef = useRef(0);
   const cadModifierPrepareRef = useRef(0);
@@ -1494,6 +1501,23 @@ export function SketchForgeEditor({
         if (preview) setNotice("Edge treatment preview ready");
         return;
       }
+      if (message.type === "previewBrep") {
+        if (message.requestId !== cadModifierLatestPreviewRef.current) return;
+        setEdgeModifier((current) => {
+          if (!current?.preview) return current;
+          const componentPreviews = current.componentPreviews.map((component, index) => {
+            const brep = message.componentBreps?.[index];
+            if (!brep) return component;
+            return { ...component, shape: { ...component.shape, cadBrep: brep } };
+          });
+          return {
+            ...current,
+            preview: { ...current.preview, cadBrep: message.brep },
+            componentPreviews,
+          };
+        });
+        return;
+      }
       if (message.type === "error") {
         if (message.requestId < cadModifierLatestPreviewRef.current) return;
         if (message.resetSession) {
@@ -1510,7 +1534,7 @@ export function SketchForgeEditor({
           return;
         }
         // The edge modifier panel already renders message.message as its error state.
-        setEdgeModifier((current) => current ? { ...current, busy: false, preview: null, error: message.message } : current);
+        setEdgeModifier((current) => current ? { ...current, busy: false, error: message.message } : current);
       }
     }
     cadModifierWorkerRestartRef.current = createWorker;
@@ -1754,7 +1778,9 @@ export function SketchForgeEditor({
       const next = new Set(current.selectedEdgeIds);
       const remove = ids.every((edgeId) => next.has(edgeId));
       ids.forEach((edgeId) => remove ? next.delete(edgeId) : next.add(edgeId));
-      return { ...current, selectedEdgeIds: [...next], preview: null, busy: next.size > 0, error: next.size ? null : "Select at least one highlighted edge" };
+      // Keep the fillet that is already on screen. Clearing it made the previous
+      // edge look erased while the next edge was calculated.
+      return { ...current, selectedEdgeIds: [...next], preview: next.size > 0 ? current.preview : null, busy: next.size > 0, error: next.size ? null : "Select at least one highlighted edge" };
     });
   }, []);
 
@@ -2599,31 +2625,55 @@ export function SketchForgeEditor({
   }, [activeFeatureId, commitShapes, selectedShape]);
 
   const suppressSelectedFeature = useCallback((featureId: string, suppressed: boolean) => {
+    if (edgeModifier) {
+      setNotice("Cancel the fillet or chamfer before turning a feature off.");
+      return;
+    }
     void (async () => {
-      const body = selectedShape;
-      if (!body?.groupedShapes?.length) return;
-      const dirty = setCsgChildSuppressed(body, featureId, suppressed);
-      const remeshGen = remeshGenerationRef.current + 1;
-      remeshGenerationRef.current = remeshGen;
-      const remeshed = await remeshCsgGroup(dirty);
-      if (remeshGen !== remeshGenerationRef.current) return;
-      const next = remeshed ?? {
-        ...dirty,
-        importedMesh: body.importedMesh,
-        csg: { ...(dirty.csg ?? { op: inferCsgOp(dirty) ?? "union", version: 1 }), dirty: true },
-      };
-      commitShapes(
-        shapesRef.current.map((entry) => (entry.id === body.id ? next : entry)),
-        body.id,
-        suppressed ? `Feature off — body rebuilt` : `Feature on — body rebuilt`,
-      );
-      if (!remeshed) {
-        setNotice("Could not rebuild body after toggling feature — last good mesh kept. Ungroup then Group to retry.");
-      } else if (next.edgeTreatments?.length) {
-        await reapplyEdgeTreatmentsRef.current(next);
+      try {
+        const body = selectedShape;
+        if (!body?.groupedShapes?.length) return;
+        const dirty = setCsgChildSuppressed(body, featureId, suppressed);
+        const hadEdgeTreatment = Boolean(dirty.edgeTreatments?.length);
+        const remeshGen = remeshGenerationRef.current + 1;
+        remeshGenerationRef.current = remeshGen;
+        const remeshed = await remeshCsgGroup(dirty);
+        if (remeshGen !== remeshGenerationRef.current) return;
+        const next = remeshed ?? {
+          ...dirty,
+          importedMesh: body.importedMesh,
+          csg: { ...(dirty.csg ?? { op: inferCsgOp(dirty) ?? "union", version: 1 }), dirty: true },
+        };
+        // A fillet belongs to the solid that existed when it was applied. Turning a
+        // feature off changes that solid, so the old fillet is cleared instead of
+        // being run again on edges that may no longer exist.
+        const committed = remeshed && hadEdgeTreatment
+          ? {
+              ...next,
+              edgeTreatments: undefined,
+              edgeTreatmentHistory: undefined,
+              cadBrep: undefined,
+              cadBrepFrame: undefined,
+              cadDisplayEdges: undefined,
+              cadDisplayEdgesVersion: undefined,
+            }
+          : next;
+        commitShapes(
+          shapesRef.current.map((entry) => (entry.id === body.id ? committed : entry)),
+          body.id,
+          !remeshed
+            ? "Could not rebuild body after toggling feature — last good mesh kept. Ungroup then Group to retry."
+            : hadEdgeTreatment
+              ? (suppressed
+                ? "Feature off. Fillet cleared — add it again on this body."
+                : "Feature on. Fillet cleared — add it again on this body.")
+              : (suppressed ? "Feature off — body rebuilt" : "Feature on — body rebuilt"),
+        );
+      } catch (error) {
+        setNotice(error instanceof Error ? error.message : "Could not turn that feature off.");
       }
     })();
-  }, [commitShapes, selectedShape]);
+  }, [commitShapes, edgeModifier, selectedShape]);
 
   const reorderSelectedFeature = useCallback((featureId: string, direction: "up" | "down") => {
     const body = selectedShape;
@@ -2651,7 +2701,11 @@ export function SketchForgeEditor({
     const cleanedPatch = cleanShapePatch(patch);
     const nextChild = canonicalizeShape(
       "hole" in cleanedPatch
-        ? withHoleMode({ ...child, ...cleanedPatch }, Boolean(cleanedPatch.hole), cleanedPatch.color)
+        ? withHoleMode(
+          { ...child, ...cleanedPatch, color: child.color, solidColor: child.solidColor },
+          Boolean(cleanedPatch.hole),
+          cleanedPatch.hole ? undefined : cleanedPatch.color,
+        )
         : { ...child, ...cleanedPatch },
     );
     const dirty = bumpCsgVersion({
@@ -4331,7 +4385,13 @@ export function SketchForgeEditor({
           }
 
           const patched = { ...shape, ...cleanedPatch };
-          const canonicalBase = canonicalizeShape("hole" in cleanedPatch ? withHoleMode(patched, Boolean(cleanedPatch.hole), cleanedPatch.color) : patched);
+          const canonicalBase = canonicalizeShape("hole" in cleanedPatch
+            ? withHoleMode(
+              { ...patched, color: shape.color, solidColor: shape.solidColor },
+              Boolean(cleanedPatch.hole),
+              cleanedPatch.hole ? undefined : cleanedPatch.color,
+            )
+            : patched);
           const canonical = bakeTransform ? canonicalizeShape(bakeShapeTransformIntoMesh(canonicalBase)) : canonicalBase;
           if (workplaneShapesEqual(shape, canonical)) {
             return shape;
@@ -5263,7 +5323,7 @@ export function SketchForgeEditor({
     cadModifierEditBeforeRef.current = editEntry ? workingShape : null;
     const appliedEdgeTreatmentCount = edgeTreatmentFeatureCount(workingShape);
     const hasAppliedEdgeTreatment = Boolean(workingShape.importedMesh && workingShape.edgeTreatments?.length);
-    const sourceParts = workingShape.groupedShapes?.length && !hasAppliedEdgeTreatment ? restoreGroupedChildren(workingShape) : [workingShape];
+    const sourceParts = edgeTreatmentSourceParts(workingShape, { keepResultMesh: hasAppliedEdgeTreatment });
     const partInputs: Array<{ shape: WorkplaneShape; mesh?: MeshData; brep?: string; brepTransform?: number[]; primitive?: CadModifierPrimitivePart }> = sourceParts.map((shape) => {
       const frame = shape.cadBrepFrame;
       const preserveNeedsRetessellation = preservesEdgeTreatmentSize(shape) && Boolean(frame) && (
@@ -5297,9 +5357,9 @@ export function SketchForgeEditor({
       edges: [],
       selectedEdgeIds: [],
       amount: editRecipe?.amount ?? defaultAmount,
-      sharpAngle: editRecipe?.sharpAngle ?? 25,
+      sharpAngle: editRecipe?.sharpAngle ?? 12,
       chamferAngle: editRecipe?.chamferAngle ?? 45,
-      quality: editRecipe?.quality ?? modifierQualityForDisplay(workspaceSettingsRef.current.displayQuality),
+      quality: "standard",
       tangentChain: true,
       preserveEdgeSize: selectedShape.edgeResizeMode === "preserve",
       busy: true,
@@ -5320,7 +5380,7 @@ export function SketchForgeEditor({
     const prepareRequestId = postCadModifierRequest({
       type: "prepare",
       parts,
-      sharpAngle: 25,
+      sharpAngle: 12,
       suppressTreatmentDetailEdges: appliedEdgeTreatmentCount > 0,
     }, parts.flatMap((part) => part.positions && part.indices ? [part.positions.buffer, part.indices.buffer] : []));
     if (prepareRequestId === null) {
@@ -5339,7 +5399,7 @@ export function SketchForgeEditor({
     }
     const appliedEdgeTreatmentCount = edgeTreatmentFeatureCount(shape);
     const hasAppliedEdgeTreatment = Boolean(shape.importedMesh && shape.edgeTreatments?.length);
-    const sourceParts = shape.groupedShapes?.length && !hasAppliedEdgeTreatment ? restoreGroupedChildren(shape) : [shape];
+    const sourceParts = edgeTreatmentSourceParts(shape, { keepResultMesh: hasAppliedEdgeTreatment });
     const partInputs: Array<{ shape: WorkplaneShape; mesh?: MeshData; brep?: string; brepTransform?: number[]; primitive?: CadModifierPrimitivePart }> = sourceParts.map((partShape) => {
       const frame = partShape.cadBrepFrame;
       const preserveNeedsRetessellation = preservesEdgeTreatmentSize(partShape) && Boolean(frame) && (
@@ -5413,7 +5473,12 @@ export function SketchForgeEditor({
     if (previewResponse.type !== "preview") {
       throw new Error("The CAD worker did not return an edge preview");
     }
-    const rawPreview = shapeFromCadMesh(shape, previewResponse.positions, previewResponse.normals, previewResponse.indices, previewResponse.brep, previewResponse.step);
+    let brep = previewResponse.brep;
+    if (!brep) {
+      const exact = await postCadModifierRequestAsync({ type: "finalize" }, [], 30000);
+      if (exact.type === "previewBrep" && exact.brep) brep = exact.brep;
+    }
+    const rawPreview = shapeFromCadMesh(shape, previewResponse.positions, previewResponse.normals, previewResponse.indices, brep, previewResponse.step);
     if (!rawPreview) {
       throw new Error("The CAD kernel returned an empty edge treatment");
     }
@@ -5561,57 +5626,72 @@ export function SketchForgeEditor({
 
   const applyEdgeModifier = useCallback(() => {
     const base = cadModifierBaseShapeRef.current;
-    if (!edgeModifier?.preview || !base) {
+    const session = edgeModifier;
+    if (!session?.preview || !base) {
       setNotice("Wait for a valid edge preview before applying");
       return;
     }
-    const recordBefore = cadModifierEditBeforeRef.current ?? base;
-    const label = cadModifierEditBeforeRef.current
-      ? (edgeModifier.kind === "fillet" ? "Updated fillet" : "Updated chamfer")
-      : (edgeModifier.kind === "fillet" ? "Filleted" : "Chamfered");
-    const selectableCount = edgeModifier.edges.filter((edge) => selectableCadModifierEdge(edge, edgeModifier.sharpAngle)).length;
-    const selectedEdgeIds = [...edgeModifier.selectedEdgeIds];
-    const feature = {
-      kind: edgeModifier.kind,
-      amount: edgeModifier.amount,
-      edgeCount: selectedEdgeIds.length,
-      edgeIds: selectedEdgeIds,
-      edgeFingerprints: fingerprintsForEdgeIds(edgeModifier.edges, selectedEdgeIds),
-      allEdges: selectedEdgeIds.length === selectableCount,
-      sharpAngle: edgeModifier.sharpAngle,
-      quality: edgeModifier.quality,
-      ...(edgeModifier.kind === "chamfer" ? { chamferAngle: edgeModifier.chamferAngle } : {}),
-    } satisfies NonNullable<WorkplaneShape["edgeTreatments"]>[number];
-    const createdAt = Date.now();
-    const previewShape = canonicalizeShape({
-      ...edgeModifier.preview,
-      cadDisplayEdges: edgeModifier.preview.cadDisplayEdges?.length
-        ? edgeModifier.preview.cadDisplayEdges
-        : cadDisplayEdgesAfterTreatment(edgeModifier.preview, edgeModifier),
-      cadDisplayEdgesVersion: 2,
-    });
-    const groupedModifiedShape = groupedShapeWithComponentEdgeTreatment(
-      recordBefore,
-      previewShape,
-      cadModifierSourcePartsRef.current,
-      edgeModifier,
-      feature,
-      createdAt,
-    );
-    const modifiedShape: WorkplaneShape = groupedModifiedShape ?? shapeWithEdgeTreatmentRecord(
-      bakedEdgeTreatmentPreview(previewShape, recordBefore),
-      recordBefore,
-      feature,
-      edgeModifier.preserveEdgeSize,
-      createdAt,
-    );
-    commitShapes(
-      shapes.map((shape) => shape.id === base.id ? modifiedShape : shape),
-      base.id,
-      `${label} ${edgeModifier.selectedEdgeIds.length} edge${edgeModifier.selectedEdgeIds.length === 1 ? "" : "s"}`,
-    );
-    invalidateCadModifierSession();
-  }, [commitShapes, edgeModifier, invalidateCadModifierSession, shapes]);
+    void (async () => {
+      let previewSource = session.preview;
+      if (!previewSource) return;
+      if (!previewSource.cadBrep) {
+        try {
+          const exact = await postCadModifierRequestAsync({ type: "finalize" }, [], 30000);
+          if (exact.type === "previewBrep" && exact.brep) {
+            previewSource = { ...previewSource, cadBrep: exact.brep };
+          }
+        } catch {
+          // The visible mesh is still applied if the exact solid is not ready.
+        }
+      }
+      const recordBefore = cadModifierEditBeforeRef.current ?? base;
+      const label = cadModifierEditBeforeRef.current
+        ? (session.kind === "fillet" ? "Updated fillet" : "Updated chamfer")
+        : (session.kind === "fillet" ? "Filleted" : "Chamfered");
+      const selectableCount = session.edges.filter((edge) => selectableCadModifierEdge(edge, session.sharpAngle)).length;
+      const selectedEdgeIds = [...session.selectedEdgeIds];
+      const feature = {
+        kind: session.kind,
+        amount: session.amount,
+        edgeCount: selectedEdgeIds.length,
+        edgeIds: selectedEdgeIds,
+        edgeFingerprints: fingerprintsForEdgeIds(session.edges, selectedEdgeIds),
+        allEdges: selectedEdgeIds.length === selectableCount,
+        sharpAngle: session.sharpAngle,
+        quality: session.quality,
+        ...(session.kind === "chamfer" ? { chamferAngle: session.chamferAngle } : {}),
+      } satisfies NonNullable<WorkplaneShape["edgeTreatments"]>[number];
+      const createdAt = Date.now();
+      const previewShape = canonicalizeShape({
+        ...previewSource,
+        cadDisplayEdges: previewSource.cadDisplayEdges?.length
+          ? previewSource.cadDisplayEdges
+          : cadDisplayEdgesAfterTreatment(previewSource, session),
+        cadDisplayEdgesVersion: 2,
+      });
+      const groupedModifiedShape = groupedShapeWithComponentEdgeTreatment(
+        recordBefore,
+        previewShape,
+        cadModifierSourcePartsRef.current,
+        session,
+        feature,
+        createdAt,
+      );
+      const modifiedShape: WorkplaneShape = groupedModifiedShape ?? shapeWithEdgeTreatmentRecord(
+        bakedEdgeTreatmentPreview(previewShape, recordBefore),
+        recordBefore,
+        feature,
+        session.preserveEdgeSize,
+        createdAt,
+      );
+      commitShapes(
+        shapes.map((shape) => shape.id === base.id ? modifiedShape : shape),
+        base.id,
+        `${label} ${session.selectedEdgeIds.length} edge${session.selectedEdgeIds.length === 1 ? "" : "s"}`,
+      );
+      invalidateCadModifierSession();
+    })();
+  }, [commitShapes, edgeModifier, invalidateCadModifierSession, postCadModifierRequestAsync, shapes]);
 
   useEffect(() => {
     if (!edgeModifier) return;
@@ -6869,7 +6949,6 @@ export function SketchForgeEditor({
       setNotice(`${invalidSvg}. Re-import the source SVG after fixing its contours`);
       return;
     }
-    const meshes = exportable.map(meshForShape);
     const selectedNotice = `Exported ${exportable.length} selected shape${exportable.length === 1 ? "" : "s"}`;
     const finishNotice = (label: string, result: DownloadResult) => {
       celebrateExport(label, `${exportable.length} solid${exportable.length === 1 ? "" : "s"}`);
@@ -6883,6 +6962,7 @@ export function SketchForgeEditor({
       setNotice(error instanceof Error ? error.message : `Could not export ${label}`);
     };
     if (format === "stl") {
+      const meshes = exportable.map(meshForShape);
       void downloadBlobFile(projectExportFileName(projectName, "stl"), toStl(meshes), "model/stl")
         .then((result) => finishNotice("STL", result))
         .catch((error: unknown) => failNotice("STL", error));
@@ -6890,15 +6970,19 @@ export function SketchForgeEditor({
     }
     if (format === "3mf") {
       try {
-        const bytes = to3mf(meshes);
-        void downloadBlobFile(projectExportFileName(projectName, "3mf"), bytes, "model/3mf")
-          .then((result) => finishNotice("3MF", result))
+        const exported = to3mfForShapes(exportable);
+        const label = exported.preserved
+          ? "3MF. The model was updated and the file’s other settings were kept"
+          : "3MF";
+        void downloadBlobFile(projectExportFileName(projectName, "3mf"), exported.bytes, "model/3mf")
+          .then((result) => finishNotice(label, result))
           .catch((error: unknown) => failNotice("3MF", error));
       } catch (error: unknown) {
         failNotice("3MF", error);
       }
       return;
     }
+    const meshes = exportable.map(meshForShape);
     void downloadTextFile(projectExportFileName(projectName, "obj"), toObj(meshes), "text/plain")
       .then((result) => finishNotice("OBJ", result))
       .catch((error: unknown) => failNotice("OBJ", error));
@@ -7148,9 +7232,12 @@ export function SketchForgeEditor({
       }
       const imported = nextShapes.map((shape) => importAsHole ? withHoleMode(shape, true) : shape);
       setStlSeatPrompt(null);
-      const label = imported.length === 1
-        ? (importAsHole ? `Imported ${file.name} as a hole` : `Imported ${file.name}`)
-        : `Imported ${imported.length} bodies from ${file.name}`;
+      const preserved3mf = is3mf && imported.some((shape) => shape.source3mf);
+      const label = preserved3mf
+        ? `Imported ${file.name}. Exporting 3MF keeps this file’s other settings.`
+        : imported.length === 1
+          ? (importAsHole ? `Imported ${file.name} as a hole` : `Imported ${file.name}`)
+          : `Imported ${imported.length} bodies from ${file.name}`;
       commitShapes([...shapesRef.current, ...imported], imported.map((shape) => shape.id), label);
       setTopPanel(null);
       // Overrides the commit notice on purpose: a partial import needs to be seen.
@@ -7311,7 +7398,7 @@ export function SketchForgeEditor({
         if (snapGrid === "Brick") return 8;
         return Number.parseFloat(snapGrid) || 1;
       })();
-      const unit = snapGridStep > 0 ? snapGridStep : 1;
+      const unit = snapGridStep > 0 ? snapGridStep : 0.01;
       const step = event.shiftKey ? unit * 5 : unit;
 
       if (sketchActive && toolbarMode === "sketch") {
@@ -8324,6 +8411,7 @@ export function SketchForgeEditor({
             }
           }}
           onSuppressFeature={selectedShape?.groupedShapes?.length ? suppressSelectedFeature : undefined}
+          modelTreeLocked={Boolean(edgeModifier)}
           onReorderFeature={selectedShape?.groupedShapes?.length ? reorderSelectedFeature : undefined}
           onUpdateFeature={selectedShape?.groupedShapes?.length ? updateSelectedFeature : undefined}
           onEditPattern={selectedShape?.patternFeature ? () => {

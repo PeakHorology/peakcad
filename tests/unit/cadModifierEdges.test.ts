@@ -38,6 +38,19 @@ describe("CAD modifier hole-rim selection", () => {
     expect(isSelectableModifierEdge(rim) && rim.angle >= SHARP_ANGLE).toBe(true);
   });
 
+  it("keeps a sharp corner on a small feature next to a large face", () => {
+    const treatmentLimit = treatmentDetailFaceAreaLimit([1600, 1600, 400, 8]);
+    const corner = edge({
+      curveType: "line",
+      surfaceTypes: ["plane", "plane"],
+      angle: 90,
+      faceAreas: [1600, 8],
+    });
+
+    expect(isModifierDisplayCadEdge(corner, treatmentLimit)).toBe(true);
+    expect(isSelectableModifierEdge(corner) && corner.angle >= SHARP_ANGLE).toBe(true);
+  });
+
   it("still hides straight chamfer-strip rails that only touch a small blend face", () => {
     const treatmentLimit = treatmentDetailFaceAreaLimit([1600, 1600, 400, 8]);
     const rail = edge({

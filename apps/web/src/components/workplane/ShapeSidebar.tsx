@@ -200,7 +200,7 @@ export function ShapeSidebar({
               const isCsgBody = Boolean(shape.groupedShapes?.length);
               const isAssembly = shape.csg?.op === "assemble" && isCsgBody;
               const children = isAssembly
-                ? (shape.groupedShapes ?? []).filter((child) => !child.hole)
+                ? (shape.groupedShapes ?? []).filter((child) => shape.hole || !child.hole)
                 : [];
               return (
                 <div key={shape.id} className="object-list-group">

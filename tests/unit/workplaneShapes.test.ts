@@ -165,6 +165,18 @@ describe("workplane shape helpers", () => {
     expect(grouped.groupedShapes?.[0].color).toBe("#222222");
   });
 
+  it("restores the original color when a hole is toggled back to a solid", () => {
+    const solid = shape({ id: "box", kind: "box", color: "#0098c7" });
+    const hole = withHoleMode(solid, true);
+    expect(hole.hole).toBe(true);
+    expect(hole.color).toBe("#b8c2cc");
+    expect(hole.solidColor).toBe("#0098c7");
+
+    const restored = withHoleMode(hole, false);
+    expect(restored.hole).toBe(false);
+    expect(restored.color).toBe("#0098c7");
+  });
+
   it("can resize the body while preserving fillet and chamfer boundary distances", () => {
     const modified = shape({
       kind: "mesh",

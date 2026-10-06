@@ -88,6 +88,7 @@ export type CadModifierWorkerRequest =
       chamferAngle: number;
     }
   | CadThreadPreviewRequest
+  | { type: "finalize"; requestId: number }
   | { type: "dispose"; requestId: number };
 
 export type CadModifierWorkerResponse =
@@ -112,5 +113,6 @@ export type CadModifierWorkerResponse =
       displayEdges: CadModifierDisplayEdge[];
       components?: CadModifierComponentMesh[];
     }
+  | { type: "previewBrep"; requestId: number; brep: string; componentBreps?: string[] }
   | { type: "disposed"; requestId: number }
   | { type: "error"; requestId: number; message: string; resetSession?: boolean };

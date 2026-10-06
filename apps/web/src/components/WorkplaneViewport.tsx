@@ -12,6 +12,7 @@ import { AlignOverlay, CircularPatternOverlay, MirrorOverlay, type AlignOverlayS
 import { ShapeInspector, SnapGridControl, type ShapeInspectorUpdateOptions } from "@/components/workplane/ShapeInspector";
 import { ToolbarDropToWorkplaneIcon, ToolbarSnapGridIcon } from "@/components/icons";
 import { objectSnapTolerance, snapAabbFromShape, snapMovingAabb, unionSnapAabbs, type ObjectSnapResult } from "@/lib/objectSnap";
+import { shapeYawDegrees } from "@/lib/shapeBounds";
 import {
   antipodeThroughAxis,
   classifyMeasureAlignment,
@@ -25,6 +26,7 @@ import {
   isRoundMeasureKind,
   measureAlignLabelPrefix,
   projectPointOnAxis,
+  rulerEdgeIsInFrontOfSurface,
   rulerEdgeNearSurfaceHit,
   snapPointToCylinder,
   vec3,
@@ -192,9 +194,10 @@ const imageTextureLoader = new THREE.TextureLoader();
  */
 const imagePlateTextureCache = new WeakMap<NonNullable<WorkplaneShape["imagePlate"]>, THREE.Texture>();
 const IMPORTED_SELECTED_EDGE_TRIANGLE_LIMIT = hardwareProfile().importedEdgeTriangleLimit;
-const NORMAL_IMPORTED_SELECTION_EDGE_ANGLE = 60;
-/** Hide near-coplanar triangulation seams on union meshes (radial hubs, etc.). */
-const IMPORTED_MESH_EDGE_ANGLE = 50;
+const NORMAL_IMPORTED_SELECTION_EDGE_ANGLE = 20;
+/** Feature creases only. Fillet facets sit near 11°, so they stay off this line. */
+const IMPORTED_MESH_EDGE_ANGLE = 20;
+const MODEL_CREASE_COLOR = "#5a6972";
 const ASSET_PLACEMENT_PREVIEW_NAME = "AssetPlacementPreview";
 
 function parseDroppedShapeAsset(raw: string): ShapeAsset | null {
@@ -273,6 +276,7 @@ export type WorkplaneViewportProps = {
   activeFeatureId?: string | null;
   onSelectFeature?: (featureId: string | null) => void;
   onSuppressFeature?: (featureId: string, suppressed: boolean) => void;
+  modelTreeLocked?: boolean;
   onReorderFeature?: (featureId: string, direction: "up" | "down") => void;
   onUpdateFeature?: (featureId: string, patch: ShapeUpdatePatch, options?: ShapeInspectorUpdateOptions) => void;
   onEditPattern?: () => void;
@@ -711,10 +715,13 @@ function cylinderMeasureFromObject(object: THREE.Object3D): CircleFit | null {
   if (!object.userData.round && !object.userData.radialSnap) return null;
   const axes = shapeWorldAxes(object);
   const dimensions = rulerShapeDimensions(object);
+  const across = dimensions[0];
+  const along = dimensions[2];
+  if (Math.abs(across - along) > 0.05) return null;
   return {
     center: axes.origin,
     axis: axes.y,
-    radius: Math.min(dimensions[0], dimensions[2]) / 2,
+    radius: across / 2,
   };
 }
 
@@ -965,11 +972,27 @@ function rulerPointAlongRay(state: ThreeState, world: THREE.Vector3) {
   return Math.max(0, world.clone().sub(state.camera.position).dot(state.raycaster.ray.direction));
 }
 
-function rulerWorldIsOccluded(state: ThreeState, targets: THREE.Object3D[], world: THREE.Vector3, rect: DOMRect) {
-  const hits = state.raycaster.intersectObjects(targets, true).filter((hit) => hit.object instanceof THREE.Mesh);
-  if (hits.length === 0) return false;
+function preciseMeshHits(state: ThreeState, targets: THREE.Object3D[]) {
+  const hits: THREE.Intersection[] = [];
+  const raycastMesh = THREE.Mesh.prototype.raycast;
+  targets.forEach((target) => {
+    target.traverse((child) => {
+      if (!(child instanceof THREE.Mesh) || !child.visible) return;
+      // Overlays opt out with an empty raycast. Dense imports otherwise answer with
+      // their bounding box, which selects the larger shape and blocks empty clicks.
+      if (child.raycast.length === 0) return;
+      raycastMesh.call(child, state.raycaster, hits);
+    });
+  });
+  hits.sort((a, b) => a.distance - b.distance);
+  return hits;
+}
+
+function rulerWorldIsOccluded(state: ThreeState, targets: THREE.Object3D[], world: THREE.Vector3, rect: DOMRect, surfaceDistance?: number) {
+  const firstDistance = surfaceDistance ?? preciseMeshHits(state, targets)[0]?.distance;
+  if (firstDistance === undefined) return false;
   const slack = Math.max(0.75, rulerWorldPerPixel(state, world, rect) * 4);
-  return hits[0].distance + slack < rulerPointAlongRay(state, world);
+  return firstDistance + slack < rulerPointAlongRay(state, world);
 }
 
 export type RankedRulerPick = {
@@ -979,8 +1002,8 @@ export type RankedRulerPick = {
   candidate: RulerCandidate;
 };
 
-const RULER_VERTEX_PX = 8;
-const RULER_EDGE_PX = 8;
+const RULER_VERTEX_PX = 10;
+const RULER_EDGE_PX = 12;
 const RULER_ANTIPODE_PX = 28;
 const RULER_ALIGN_PX = 22;
 
@@ -1157,17 +1180,14 @@ function pickModelRulerCandidate(
         if (attachments.some((attachment) => !attachment)) return;
         const normalizedPoints = attachments.map((attachment) => (attachment as RulerAttachment).normalized);
         const closed = worldPoints[0].distanceToSquared(worldPoints[worldPoints.length - 1]) < 1e-10;
-        const uniqueCount = closed ? Math.max(1, worldPoints.length - 1) : worldPoints.length;
-        const edge: RulerEdgeAttachment | undefined = uniqueCount <= 2
-          ? {
-            key: `${shapeId}:${child.uuid}:${pathIndex}`,
-            shapeId,
-            normalizedPoints,
-            topologyKey: target.userData.rulerTopologyKey as string | undefined,
-            circle: circleFitFromWorldPoints(worldPoints) ?? undefined,
-          }
-          : undefined;
-        const circle = edge?.circle ?? circleFitFromWorldPoints(worldPoints) ?? undefined;
+        const edge: RulerEdgeAttachment = {
+          key: `${shapeId}:${child.uuid}:${pathIndex}`,
+          shapeId,
+          normalizedPoints,
+          topologyKey: target.userData.rulerTopologyKey as string | undefined,
+          circle: circleFitFromWorldPoints(worldPoints) ?? undefined,
+        };
+        const circle = edge.circle;
         const endpointIndexes = closed ? [0] : [0, worldPoints.length - 1];
         endpointIndexes.forEach((index) => {
           const screen = projectCadPointToCanvas(worldPoints[index], state, rect);
@@ -1237,28 +1257,31 @@ function pickModelRulerCandidate(
 
   ranked.sort(compareRulerPicks);
 
-  const surfaceHit = state.raycaster.intersectObjects(targets, true).find((entry) => entry.object instanceof THREE.Mesh);
+  const surfaceHit = preciseMeshHits(state, targets)[0];
 
   if (surfaceHit) {
     const hitPoint = surfaceHit.point.clone();
-    const hitId = surfaceHit.object.userData.shapeId as string;
+    const hitId = (surfaceHit.object.userData.shapeId as string | undefined) ?? (surfaceHit.object.parent?.userData.shapeId as string | undefined);
     const hitWpp = rulerWorldPerPixel(state, hitPoint, rect);
     const worldNormal = surfaceHit.face
       ? surfaceHit.face.normal.clone().transformDirection(surfaceHit.object.matrixWorld).normalize()
       : null;
-    const hitObject = findShapeObject(state, hitId);
+    const hitObject = hitId ? findShapeObject(state, hitId) : null;
     const barrelCircle = hitObject?.userData.radialSnap ? cylinderMeasureFromObject(hitObject) : null;
     const barrelHit = Boolean(barrelCircle && worldNormal && !isAxialDirection(vecFromThree(worldNormal), barrelCircle.axis));
     const nearby = ranked.filter((pick) => {
-      if (pick.candidate.attachment?.shapeId !== hitId) return false;
+      if (hitId && pick.candidate.attachment?.shapeId !== hitId) return false;
       if (pick.screenDist > RULER_EDGE_PX) return false;
       const world = new THREE.Vector3(pick.candidate.x, pick.candidate.y, pick.candidate.z);
-      if (!rulerEdgeNearSurfaceHit(vecFromThree(hitPoint), vecFromThree(world), hitWpp)) return false;
-      return !rulerWorldIsOccluded(state, targets, world, rect);
+      const onFace = rulerEdgeNearSurfaceHit(vecFromThree(hitPoint), vecFromThree(world), hitWpp);
+      const inFront = rulerEdgeIsInFrontOfSurface(pick.rayT, surfaceHit.distance, hitWpp);
+      if (!onFace && !inFront) return false;
+      return !rulerWorldIsOccluded(state, targets, world, rect, surfaceHit.distance);
     });
     nearby.sort(compareRulerPicks);
 
     const surfaceCandidate = (() => {
+      if (!hitId) return null;
       if (barrelCircle && barrelHit) {
         return attachSnappedCirclePoint(
           state,
@@ -1279,13 +1302,13 @@ function pickModelRulerCandidate(
       seed ? applySeedAlignment(state, seed, candidate, rect, pointerX, pointerY, worldNormal) : stampRulerNormal(candidate, worldNormal)
     );
 
+    if (nearby[0]) return stampRulerNormal(finalizeRulerPick(state, nearby[0].candidate), worldNormal);
     if (seed && surfaceCandidate) {
       const aligned = applySeedAlignment(state, seed, surfaceCandidate, rect, pointerX, pointerY, worldNormal);
       const seedWorld = rulerPointWorld(state, seed);
       const jumpedToSeed = Math.hypot(aligned.x - seedWorld.x, aligned.y - seedWorld.y, aligned.z - seedWorld.z) < 0.5;
       if (!jumpedToSeed && (aligned.alignHint === "diameter" || aligned.alignHint === "face")) return aligned;
     }
-    if (nearby[0]) return finish(finalizeRulerPick(state, nearby[0].candidate));
     if (surfaceCandidate) return finish(surfaceCandidate);
     return null;
   }
@@ -1615,7 +1638,7 @@ function RulerOverlay({
             rx="2"
           />
         ) : null}
-        {active && overlay.hover ? <circle className="ruler-hover-point" cx={overlay.hover.screenX} cy={overlay.hover.screenY} r="5" /> : null}
+        {active && overlay.hover ? <circle className={`ruler-hover-point${overlay.hover.edgeScreenPoints ? " on-edge" : ""}`} cx={overlay.hover.screenX} cy={overlay.hover.screenY} r="5" /> : null}
       </svg>
       {overlay.segments.map((segment) => (
         <span
@@ -1678,7 +1701,14 @@ function selectionFrameForShapes(shapes: WorkplaneShape[], selectedIds: string[]
   }
 
   const singleShape = selected.length === 1 ? selected[0] : null;
-  const quaternion = singleShape ? quaternionForShape(singleShape) : new THREE.Quaternion();
+  const quaternion = singleShape
+    ? new THREE.Quaternion().setFromEuler(new THREE.Euler(
+      THREE.MathUtils.degToRad(singleShape.rotationX ?? 0),
+      THREE.MathUtils.degToRad(shapeYawDegrees(singleShape)),
+      THREE.MathUtils.degToRad(singleShape.rotationZ ?? 0),
+      "XYZ",
+    ))
+    : new THREE.Quaternion();
   const inverse = quaternion.clone().invert();
   const localMin = new THREE.Vector3(Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY, Number.POSITIVE_INFINITY);
   const localMax = new THREE.Vector3(Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NEGATIVE_INFINITY);
@@ -2239,6 +2269,7 @@ export function WorkplaneViewport({
   activeFeatureId = null,
   onSelectFeature,
   onSuppressFeature,
+  modelTreeLocked = false,
   onReorderFeature,
   onUpdateFeature,
   onEditPattern,
@@ -4043,10 +4074,9 @@ export function WorkplaneViewport({
     const hits: string[] = [];
     const seen = new Set<string>();
     try {
-    const intersections = state.raycaster.intersectObjects(state.shapeLayer.children, true);
-    // Outline lines use a world-space threshold (1.15 mm). On a tight assembly that tube
-    // sits in front of the neighboring solid, so the first hit was the outline, not the part
-    // under the cursor. Body picks use the mesh surface only; edges stay for fillet picking.
+    // Closest real surface wins, front to back. A miss is empty space and clears
+    // the selection, including the white area around the grid.
+    const intersections = preciseMeshHits(state, state.shapeLayer.children);
     intersections.forEach((entry) => {
       if (!(entry.object instanceof THREE.Mesh)) {
         return;
@@ -4062,33 +4092,8 @@ export function WorkplaneViewport({
       seen.add(id);
       hits.push(id);
     });
-    if (hits.length > 0) {
-      pickCacheRef.current = { x: clientX, y: clientY, hits };
-      return hits;
-    }
-
-    // A ray that misses every surface may still be a near-miss on one isolated part.
-    // A wide center magnet (previously up to 112 px, sized from the part) selected the
-    // big neighbor whenever two parts sat close together.
-    const nearby: Array<{ id: string; distance: number }> = [];
-    shapesRef.current.forEach((shape) => {
-      if (shape.hidden) {
-        return;
-      }
-      const center = new THREE.Vector3(shape.x, (shape.elevation ?? 0) + shape.height / 2, shape.z).project(state.camera);
-      const screenX = rect.left + ((center.x + 1) / 2) * rect.width;
-      const screenY = rect.top + ((1 - center.y) / 2) * rect.height;
-      const distance = Math.hypot(clientX - screenX, clientY - screenY);
-      if (distance <= 14) {
-        nearby.push({ id: shape.id, distance });
-      }
-    });
-    nearby.sort((a, b) => a.distance - b.distance);
-    const missed = nearby.length === 0 || (nearby.length > 1 && nearby[1].distance - nearby[0].distance < 8)
-      ? []
-      : [nearby[0].id];
-    pickCacheRef.current = { x: clientX, y: clientY, hits: missed };
-    return missed;
+    pickCacheRef.current = { x: clientX, y: clientY, hits };
+    return hits;
     } catch (error) {
       console.error("Shape pick failed", error);
       return [];
@@ -4105,7 +4110,7 @@ export function WorkplaneViewport({
     state.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     state.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     state.raycaster.setFromCamera(state.pointer, state.camera);
-    const hit = state.raycaster.intersectObjects(state.shapeLayer.children, true).find((entry) => {
+    const hit = preciseMeshHits(state, state.shapeLayer.children).find((entry) => {
       const id = entry.object.userData.shapeId;
       if (typeof id !== "string") return false;
       const shape = shapesRef.current.find((item) => item.id === id);
@@ -4311,7 +4316,7 @@ export function WorkplaneViewport({
     state.pointer.x = ((clientX - rect.left) / rect.width) * 2 - 1;
     state.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
     state.raycaster.setFromCamera(state.pointer, state.camera);
-    const hits = state.raycaster.intersectObjects(state.shapeLayer.children, true);
+    const hits = preciseMeshHits(state, state.shapeLayer.children);
     for (const hit of hits) {
       if (!(hit.object instanceof THREE.Mesh)) continue;
       let shapeId: string | null = null;
@@ -5813,6 +5818,7 @@ export function WorkplaneViewport({
             activeFeatureId={activeFeatureId}
             onSelectFeature={onSelectFeature}
             onSuppressFeature={onSuppressFeature}
+            modelTreeLocked={modelTreeLocked}
             onReorderFeature={onReorderFeature}
             onUpdateFeature={onUpdateFeature}
             onEditPattern={onEditPattern}
@@ -6742,11 +6748,13 @@ function applyXrayClipping(state: ThreeState | null, enabled: boolean, height: n
 }
 
 function modifierEdgeMaterialStyle(active: boolean, hovered: boolean, previewActive: boolean) {
-  const subduedSelectedPreviewEdge = previewActive && active && !hovered;
   return {
     color: active ? (hovered ? "#ffbf45" : "#ff8a1d") : hovered ? "#84edff" : "#17b7e5",
-    opacity: subduedSelectedPreviewEdge ? 0.18 : active || hovered ? 1 : 0.72,
+    // Stay fully orange after the preview mesh arrives. Fading the selection made a
+    // second fillet group look unselected once its preview finished.
+    opacity: active || hovered ? 1 : 0.72,
     linewidth: active || hovered ? 3 : 1,
+    renderOrder: hovered ? 1005 : active ? (previewActive ? 1004 : 1002) : 1001,
   };
 }
 
@@ -6756,7 +6764,7 @@ function modifierEdgeAppearance(line: THREE.Line, active: boolean, hovered: bool
   material.color.set(style.color);
   material.opacity = style.opacity;
   material.linewidth = style.linewidth;
-  line.renderOrder = hovered ? 1003 : active ? 1002 : 1001;
+  line.renderOrder = style.renderOrder;
 }
 
 function rebuildModifierEdges(state: ThreeState | null, edges: CadModifierEdge[], selectedIds: number[], previewActive = false, hoverId: number | null = null) {
@@ -7854,7 +7862,8 @@ function createShapeObject(shape: WorkplaneShape, showEdges = false, onTextureRe
   group.userData.hole = Boolean(shape.hole);
   group.userData.construction = Boolean(shape.construction);
   group.userData.round = isRoundMeasureKind(shape.kind, shape.hole);
-  group.userData.radialSnap = isConstantRadiusRoundKind(shape.kind);
+  group.userData.radialSnap = isConstantRadiusRoundKind(shape.kind)
+    && Math.abs(shapeWidth(shape) - shapeDepth(shape)) <= 0.05;
   group.userData.shapeKind = shape.kind;
   group.userData.showEdges = showEdges;
   group.userData.rulerDimensions = [shapeWidth(shape), shape.height, shapeDepth(shape)] satisfies [number, number, number];
@@ -7870,7 +7879,7 @@ function createShapeObject(shape: WorkplaneShape, showEdges = false, onTextureRe
   if (shape.groupedShapes?.length && !hasUsableCsgResultMesh(shape)) {
     const content = new THREE.Group();
     viewportGroupChildren(shape).forEach((child) => {
-      const childShape = shape.hole ? { ...child, hole: true, color: "#b8c2cc" } : child;
+      const childShape = child;
       const childObject = createShapeObject(childShape, showEdges, onTextureReady);
       content.add(childObject);
     });
@@ -8009,7 +8018,7 @@ function createShapeObject(shape: WorkplaneShape, showEdges = false, onTextureRe
           new THREE.Vector3(width / 2, 1, depth / 2),
         );
       } else {
-        addMesh(group, new THREE.BoxGeometry(size, Math.max(3, height * 0.35), size * 0.72), material, shape);
+        addMesh(group, new THREE.BoxGeometry(width, height, depth), material, shape);
       }
       break;
     case "scribble":
@@ -8017,7 +8026,7 @@ function createShapeObject(shape: WorkplaneShape, showEdges = false, onTextureRe
       break;
     case "sketch":
     default:
-      addMesh(group, new THREE.BoxGeometry(size, Math.max(3, height * 0.35), size * 0.72), material, shape);
+      addMesh(group, new THREE.BoxGeometry(width, height, depth), material, shape);
       break;
   }
 
@@ -8158,28 +8167,24 @@ function addMesh(
   // Flat-faced primitives (box, polygon, …) need quiet crease lines when idle — lighting alone washes them out.
   const roundedBox = shape.kind === "box" && Boolean(shape.radius && shape.radius > 0);
   const facetedSolid = !curvedSurface && !roundedBox && !shape.importedMesh;
-  const showIdleEdges = !shape.hole && !shape.construction && !shape.importedMesh && (sharpDetailEdges || facetedSolid);
   const importedTriangleCount = shape.importedMesh?.triangleCount ?? 0;
   const skipHeavyImportedEdges = Boolean(shape.importedMesh) && importedTriangleCount > Math.min(IMPORTED_SELECTED_EDGE_TRIANGLE_LIMIT, 20_000);
+  const showImportedCreases = Boolean(shape.importedMesh) && !shape.hole && !shape.construction && !skipHeavyImportedEdges;
+  const showIdleEdges = !shape.hole && !shape.construction && (showImportedCreases || (!shape.importedMesh && (sharpDetailEdges || facetedSolid)));
   const selectedOutline = Boolean(group.userData.showEdges);
   if ((group.userData.showEdges || showIdleEdges) && !skipHeavyImportedEdges) {
     const selectedRoundedBox = selectedOutline && shape.kind === "box" && Boolean(shape.radius && shape.radius > 0);
-    const edgeColor = selectedOutline
-      ? "#00aeea"
-      : sharpDetailEdges
-        ? "#141b21"
-        : darkenHex(shape.color, 0.42);
+    const creaseEdges = showImportedCreases || sharpDetailEdges || facetedSolid;
+    const edgeColor = selectedOutline && curvedSurface ? "#00aeea" : creaseEdges ? MODEL_CREASE_COLOR : darkenHex(shape.color, 0.55);
     const edgeOpacity = selectedRoundedBox
       ? 0
-      : selectedOutline
-        ? curvedSurface
+      : selectedOutline && curvedSurface
+        ? 0.55
+        : creaseEdges
           ? 0.55
-          : 0.98
-        : sharpDetailEdges
-          ? 0.32
           : shape.kind === "text"
             ? 0.86
-            : 0.36;
+            : 0.8;
     if (!(
       shape.importedMesh
       && shape.cadDisplayEdgesVersion === 2
@@ -8203,6 +8208,9 @@ function addMesh(
           transparent: true,
           opacity: edgeOpacity,
           depthWrite: false,
+          polygonOffset: true,
+          polygonOffsetFactor: -2,
+          polygonOffsetUnits: -2,
         }),
       );
       edges.userData.complexEdge = sharpDetailEdges || curvedSurface || facetedSolid;
@@ -8223,7 +8231,15 @@ function addCadDisplayEdges(group: THREE.Group, shape: WorkplaneShape, color: st
     shape.importedMesh?.indices,
   );
   if (edges.length === 0) return false;
-  const material = new THREE.LineBasicMaterial({ color, depthWrite: false, transparent: true, opacity });
+  const material = new THREE.LineBasicMaterial({
+    color,
+    depthWrite: false,
+    transparent: true,
+    opacity,
+    polygonOffset: true,
+    polygonOffsetFactor: -2,
+    polygonOffsetUnits: -2,
+  });
   edges.forEach((edge) => {
     if (edge.points.length < 6) return;
     const positions = resizedImportedCoordinates(shape, edge.points);
@@ -8619,9 +8635,7 @@ function raycastSketchFaceHit(
   state.pointer.y = -((clientY - rect.top) / rect.height) * 2 + 1;
   state.raycaster.setFromCamera(state.pointer, state.camera);
 
-  const meshHit = state.raycaster
-    .intersectObjects(state.shapeLayer.children, true)
-    .find((entry) => {
+  const meshHit = preciseMeshHits(state, state.shapeLayer.children).find((entry) => {
       if (!(entry.object instanceof THREE.Mesh) || !entry.face) return false;
       let id = entry.object.userData.shapeId;
       if (typeof id !== "string") {

@@ -79,6 +79,22 @@ export const ALIGN_EPSILON = 0.0005;
 export const ALIGN_AXES: AlignAxis[] = ["x", "y", "z"];
 export const ALIGN_TARGETS: AlignTarget[] = ["min", "center", "max"];
 
+/** Bounds used by Align. Primitives use their width × depth × height box, same as a rectangle. */
+export function alignmentBounds(shape: WorkplaneShape): Cuboid {
+  if ((shape.kind === "mesh" || shape.kind === "thread") && shape.importedMesh) {
+    return meshAabb(shape);
+  }
+  const box = worldAabb(shape);
+  return {
+    minX: box.min[0],
+    maxX: box.max[0],
+    minY: box.min[1],
+    maxY: box.max[1],
+    minZ: box.min[2],
+    maxZ: box.max[2],
+  };
+}
+
 export function alignCoordinate(bounds: Cuboid, axis: AlignAxis, target: AlignTarget) {
   const min = axis === "x" ? bounds.minX : axis === "y" ? bounds.minY : bounds.minZ;
   const max = axis === "x" ? bounds.maxX : axis === "y" ? bounds.maxY : bounds.maxZ;
@@ -91,43 +107,17 @@ export function alignCoordinate(bounds: Cuboid, axis: AlignAxis, target: AlignTa
   return (min + max) / 2;
 }
 
-/** Design pivot — axis center for cones/frustums, not mesh-AABB midpoint. */
-export function shapeAlignCenter(shape: WorkplaneShape, axis: AlignAxis) {
-  if (axis === "x") {
-    return shape.x;
-  }
-  if (axis === "z") {
-    return shape.z;
-  }
-  return (shape.elevation ?? 0) + shape.height / 2;
-}
-
-export function alignCoordinateForShape(shape: WorkplaneShape, bounds: Cuboid, axis: AlignAxis, target: AlignTarget) {
-  if (target === "center") {
-    return shapeAlignCenter(shape, axis);
-  }
+export function alignCoordinateForShape(_shape: WorkplaneShape, bounds: Cuboid, axis: AlignAxis, target: AlignTarget) {
   return alignCoordinate(bounds, axis, target);
 }
 
 export function referenceAlignCoordinate(
-  shapes: WorkplaneShape[],
+  _shapes: WorkplaneShape[],
   boundsById: Map<string, Cuboid>,
   anchorId: string | null,
   axis: AlignAxis,
   target: AlignTarget,
 ) {
-  if (target === "center") {
-    if (anchorId) {
-      const anchor = shapes.find((shape) => shape.id === anchorId);
-      if (anchor) {
-        return shapeAlignCenter(anchor, axis);
-      }
-    }
-    if (shapes.length === 0) {
-      return 0;
-    }
-    return shapes.reduce((sum, shape) => sum + shapeAlignCenter(shape, axis), 0) / shapes.length;
-  }
   const anchorBounds = anchorId ? boundsById.get(anchorId) ?? null : null;
   const referenceBounds = anchorBounds ?? boundsForCuboids(Array.from(boundsById.values()));
   return alignCoordinate(referenceBounds, axis, target);
@@ -148,7 +138,7 @@ export function alignmentStatuses(selection: WorkplaneShape[], anchorId: string 
     return [];
   }
 
-  const boundsById = new Map(selection.map((shape) => [shape.id, meshAabb(shape)]));
+  const boundsById = new Map(selection.map((shape) => [shape.id, alignmentBounds(shape)]));
 
   return ALIGN_AXES.flatMap((axis) =>
     ALIGN_TARGETS.map((target) => {
@@ -185,7 +175,7 @@ export function alignedShapesForSelection(
   target: AlignTarget,
 ) {
   const selected = new Set(selectedIds);
-  const boundsById = new Map(selectedShapes.map((shape) => [shape.id, meshAabb(shape)]));
+  const boundsById = new Map(selectedShapes.map((shape) => [shape.id, alignmentBounds(shape)]));
   const targetValue = referenceAlignCoordinate(selectedShapes, boundsById, anchorId, axis, target);
   let moved = 0;
 

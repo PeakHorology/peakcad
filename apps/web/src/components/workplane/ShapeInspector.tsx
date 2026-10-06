@@ -9,6 +9,8 @@ import { TOOL_DESCRIPTIONS } from "@/lib/toolDescriptions";
 import { displayStepFromMillimeters, displayToMillimeters, formatMeasurementNumber, lengthDisplayUnit, millimetersToDisplay } from "@/lib/measurementUnits";
 import {
   clampRoofRidgeX,
+  MAX_ROOF_ANGLE,
+  MIN_ROOF_ANGLE,
   roofAnglesFromProfile,
   roofAnglesFromRidge,
   roofRidgeXFromLeftAngle,
@@ -329,8 +331,8 @@ function getShapeProperties(shape: WorkplaneShape, onUpdate: ShapeInspectorUpdat
       );
     };
     return [
-      { label: "Left Angle", value: angles.leftAngle, min: 1, max: 179, step: 0.1, onChange: setLeftAngle },
-      { label: "Right Angle", value: angles.rightAngle, min: 1, max: 179, step: 0.1, onChange: setRightAngle },
+      { label: "Left Angle", value: angles.leftAngle, min: MIN_ROOF_ANGLE, max: MAX_ROOF_ANGLE, step: 0.1, onChange: setLeftAngle },
+      { label: "Right Angle", value: angles.rightAngle, min: MIN_ROOF_ANGLE, max: MAX_ROOF_ANGLE, step: 0.1, onChange: setRightAngle },
       { label: "Length", value: depth, min: MIN_SHAPE_SIZE, max: 160, onChange: setDepth },
       { label: "Width", value: width, min: MIN_SHAPE_SIZE, max: 160, onChange: setRoofWidth },
       { label: "Height", value: shape.height, min: MIN_SHAPE_SIZE, max: 160, onChange: setRoofHeight },
@@ -443,6 +445,7 @@ export function ShapeInspector({
   activeFeatureId = null,
   onSelectFeature,
   onSuppressFeature,
+  modelTreeLocked = false,
   onReorderFeature,
   onUpdateFeature,
   sceneShapes,
@@ -463,6 +466,8 @@ export function ShapeInspector({
   activeFeatureId?: string | null;
   onSelectFeature?: (featureId: string | null) => void;
   onSuppressFeature?: (featureId: string, suppressed: boolean) => void;
+  /** Fillet/chamfer is open, so the model tree must not rebuild the body. */
+  modelTreeLocked?: boolean;
   onReorderFeature?: (featureId: string, direction: "up" | "down") => void;
   /** Patch a CSG child selected in the model tree (rebuilds the body). */
   onUpdateFeature?: (featureId: string, patch: Partial<WorkplaneShape>, options?: ShapeInspectorUpdateOptions) => void;
@@ -562,7 +567,7 @@ export function ShapeInspector({
           className={!inspectTarget.hole ? "active solid-choice" : "solid-choice"}
           onClick={() => {
             const wasHole = Boolean(inspectTarget.hole);
-            updateInspectTarget({ hole: false, color: solidColor });
+            updateInspectTarget(wasHole ? { hole: false } : { hole: false, color: solidColor });
             setColorOpen((open) => (wasHole ? false : !open));
           }}
           disabled={locked}
@@ -575,7 +580,7 @@ export function ShapeInspector({
         <button
           className={inspectTarget.hole ? "active hole-choice" : "hole-choice"}
           onClick={() => {
-            updateInspectTarget({ hole: true, color: "#b8c2cc" });
+            updateInspectTarget({ hole: true });
             setColorOpen(false);
           }}
           disabled={locked}
@@ -864,11 +869,11 @@ export function ShapeInspector({
                               : "…"}
                       </span>
                     </button>
-                    <label className="csg-feature-suppress" title="Suppress feature">
+                    <label className="csg-feature-suppress" title={modelTreeLocked ? "Cancel the fillet or chamfer before turning a feature off" : "Suppress feature"}>
                       <input
                         type="checkbox"
                         checked={suppressed}
-                        disabled={locked || !onSuppressFeature}
+                        disabled={locked || !onSuppressFeature || modelTreeLocked}
                         onChange={(event) => onSuppressFeature?.(child.id, event.target.checked)}
                       />
                       <span>Off</span>
@@ -1065,7 +1070,7 @@ function RangeProperty({
           type="range"
           min={controlMin}
           max={controlMax}
-          step={controlStep}
+          step={isAngle ? "any" : controlStep}
           value={sliderValue}
           disabled={disabled}
           onPointerDown={() => onInteractionActiveChange?.(true)}

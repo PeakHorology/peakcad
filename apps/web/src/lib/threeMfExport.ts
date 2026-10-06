@@ -1,4 +1,8 @@
 import { zipSync, strToU8 } from "fflate";
+import { meshForShape } from "@/lib/editorShapeMesh";
+import { rewrite3mf } from "@/lib/threeMfPackage";
+import { lookup3mfPackage } from "@/lib/threeMfSource";
+import type { WorkplaneShape } from "@/types/sketchforge";
 
 export type ThreeMfMeshData = {
   name: string;
@@ -88,4 +92,24 @@ export function to3mf(meshes: ThreeMfMeshData[]): Uint8Array {
     },
     { level: 6 },
   );
+}
+
+function sourceCarrier(shape: WorkplaneShape): WorkplaneShape | null {
+  if (shape.source3mf || lookup3mfPackage(shape.source3mfKey)) {
+    return shape.source3mf ? shape : { ...shape, source3mf: lookup3mfPackage(shape.source3mfKey) };
+  }
+  return null;
+}
+
+/**
+ * Export a 3MF. A shape that was imported from a 3MF is written back into that
+ * package so print settings, materials, and other files stay put.
+ */
+export function to3mfForShapes(shapes: WorkplaneShape[]): { bytes: Uint8Array; preserved: boolean } {
+  const carrier = shapes.length === 1 ? sourceCarrier(shapes[0]) : null;
+  if (carrier) {
+    const bytes = rewrite3mf(carrier);
+    if (bytes) return { bytes, preserved: true };
+  }
+  return { bytes: to3mf(shapes.map((shape) => meshForShape(shape))), preserved: false };
 }

@@ -1,4 +1,5 @@
 import type { SketchDoc } from "@/lib/sketch/types";
+import type { ThreeMfSourcePackage } from "@/lib/threeMfSource";
 
 export type ShapeKind =
   | "box"
@@ -235,6 +236,8 @@ export type WorkplaneShape = {
   kind: ShapeKind;
   color: string;
   hole?: boolean;
+  /** Color to restore when a hole is toggled back to a solid. */
+  solidColor?: string;
   x: number;
   z: number;
   elevation?: number;
@@ -342,6 +345,13 @@ export type WorkplaneShape = {
   construction?: boolean;
   /** Parametric hole cutter (diameter / through / counterbore). */
   holeSpec?: HoleSpec;
+  /**
+   * Original 3MF package, minus the triangle mesh. Export writes the edited
+   * model back into this package and leaves the other files alone.
+   */
+  source3mf?: ThreeMfSourcePackage;
+  /** Short id used to reattach `source3mf` after undo, without copying the package into every history step. */
+  source3mfKey?: string;
 };
 
 export type LinearPatternFeatureParams = {

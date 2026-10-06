@@ -1,7 +1,11 @@
 /** Triangle/roof cross-section helpers. Angles are interior base angles (degrees). */
 
-const MIN_ANGLE = 1;
-const MAX_ANGLE = 179;
+/** Base angles below this make a triangle degenerate. Flat parts sit near this floor. */
+export const MIN_ROOF_ANGLE = 0.1;
+export const MAX_ROOF_ANGLE = 179.9;
+
+const MIN_ANGLE = MIN_ROOF_ANGLE;
+const MAX_ANGLE = MAX_ROOF_ANGLE;
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
@@ -73,7 +77,7 @@ export function roofAnglesFromRidge(width: number, height: number, ridgeX: numbe
   };
 }
 
-/** Clamp ridge so both base angles stay within (1°, 179°). */
+/** Clamp ridge so both base angles stay inside the allowed range when that range exists. */
 export function clampRoofRidgeX(width: number, height: number, ridgeX: number) {
   // Both bounds used to come from the left angle, so the allowed span was centred on the left
   // base corner rather than on the shape and the right angle was never constrained — a symmetric
@@ -89,9 +93,13 @@ export function clampRoofRidgeX(width: number, height: number, ridgeX: number) {
   const lo = Math.max(Math.min(...leftBounds), Math.min(...rightBounds));
   const hi = Math.min(Math.max(...leftBounds), Math.max(...rightBounds));
   if (lo > hi) {
-    // Very wide and very flat: no apex keeps both base angles above 1°, so honour the symmetry
-    // the user drew rather than skewing the roof to satisfy one side.
-    return 0;
+    // A very flat triangle cannot keep both base angles inside the limit at once.
+    // Still let the peak slide across the base; forcing the center made the angle
+    // controls look dead on thin parts.
+    const safeWidth = Math.max(0.01, width);
+    const safeHeight = Math.max(0.01, height);
+    const inset = Math.min(safeWidth * 0.02, safeHeight);
+    return clamp(ridgeX, -safeWidth / 2 + inset, safeWidth / 2 - inset);
   }
   return clamp(ridgeX, lo, hi);
 }

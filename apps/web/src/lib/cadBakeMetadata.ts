@@ -62,7 +62,8 @@ function analyticPrimitiveTransform(shape: WorkplaneShape, height: number, yawDe
 }
 
 export function cadModifierPrimitiveForAnalyticBox(shape: WorkplaneShape): CadModifierPrimitivePart | null {
-  if (shape.kind !== "box" || shape.importedMesh || shape.groupedShapes?.length) {
+  // A display mesh on a box is only a cache. Fillet needs the exact box, not that soup.
+  if (shape.kind !== "box" || shape.groupedShapes?.length) {
     return null;
   }
 
@@ -85,7 +86,7 @@ export function cadModifierPrimitiveForAnalyticBox(shape: WorkplaneShape): CadMo
 
 /** Circular native cylinders as exact OCCT solids so Thread can find cylindrical faces. */
 export function cadModifierPrimitiveForAnalyticCylinder(shape: WorkplaneShape): CadModifierPrimitivePart | null {
-  if (shape.kind !== "cylinder" || shape.importedMesh || shape.groupedShapes?.length || shape.cadBrep) {
+  if (shape.kind !== "cylinder" || shape.groupedShapes?.length || shape.cadBrep) {
     return null;
   }
 

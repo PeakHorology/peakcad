@@ -63,11 +63,13 @@ describe("worldAabb", () => {
     expect(box.max).toEqual([10, 6, 0]);
   });
 
-  it("falls back to the bounding-sphere box for a rotated shape", () => {
+  it("uses the rotated footprint, not a bounding sphere", () => {
     const box = worldAabb(shape({ width: 10, depth: 6, height: 4, rotation: 30 }));
     const r = 0.5 * Math.sqrt(10 * 10 + 4 * 4 + 6 * 6);
-    expect(box.min).toEqual([-r, 2 - r, -r]);
-    expect(box.max).toEqual([r, 2 + r, r]);
+    expect(box.max[0] - box.min[0]).toBeLessThan(r * 2);
+    expect(box.max[0]).toBeCloseTo(-box.min[0], 5);
+    expect(box.min[1]).toBeCloseTo(0, 5);
+    expect(box.max[1]).toBeCloseTo(4, 5);
   });
 
   it("treats a circular cylinder's yaw as no rotation and keeps the tight box", () => {

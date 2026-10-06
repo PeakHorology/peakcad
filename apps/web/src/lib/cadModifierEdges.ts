@@ -6,6 +6,11 @@ export const CAD_DISPLAY_EDGE_MIN_ANGLE = 0.75;
  * fillet rails can still be treated as treatment-detail after an earlier fillet.
  */
 export const HOLE_RIM_MIN_ANGLE = 20;
+/**
+ * A crease this sharp is a real corner, even when one face is small (a step,
+ * tooth, or boss on a large plate). Shallower rails on blend faces stay hidden.
+ */
+export const HARD_FEATURE_EDGE_ANGLE = 55;
 
 const CURVED_SURFACE_TYPES = new Set([
   "cylinder",
@@ -77,6 +82,8 @@ export function isModifierDisplayCadEdge(edge: CadEdgeClassificationInput, treat
   if (!isDisplayCadEdge(edge)) return false;
   if (treatmentAreaLimit <= 0) return true;
   if (isHoleRimFeatureEdge(edge) || isAnalyticHoleRim(edge)) return true;
+  const effectiveAngle = Math.min(edge.angle, 180 - edge.angle);
+  if (effectiveAngle + 1e-3 >= HARD_FEATURE_EDGE_ANGLE) return true;
   return !touchesTreatmentDetailFace(edge.faceAreas, treatmentAreaLimit);
 }
 

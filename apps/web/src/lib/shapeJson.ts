@@ -1,3 +1,4 @@
+import { lookup3mfPackage, remember3mfPackage } from "@/lib/threeMfSource";
 import { canonicalizeShape } from "@/lib/workplaneShapes";
 import { bakedImportedBrepStep } from "@/lib/importedBrepSource";
 import type { WorkplaneShape } from "@/types/sketchforge";
@@ -62,8 +63,12 @@ function hydrateMesh(mesh: NonNullable<WorkplaneShape["importedMesh"]>): NonNull
 }
 
 export function hydrateClipboardShape(shape: WorkplaneShape): WorkplaneShape {
+  const source3mf = shape.source3mf
+    ? remember3mfPackage(shape.source3mf)
+    : lookup3mfPackage(shape.source3mfKey);
   return canonicalizeShape({
     ...shape,
+    ...(source3mf ? { source3mf, source3mfKey: source3mf.key } : {}),
     importedMesh: shape.importedMesh ? hydrateMesh(shape.importedMesh) : undefined,
     groupedShapes: shape.groupedShapes?.map(hydrateClipboardShape),
     edgeTreatmentHistory: shape.edgeTreatmentHistory?.map((entry) => ({

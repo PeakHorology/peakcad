@@ -20,6 +20,13 @@ describe("roof ridge clamping", () => {
     expect(profile.leftRun).toBeCloseTo(profile.rightRun, 6);
   });
 
+  it("lets a flat triangle slide its peak instead of snapping back to center", () => {
+    const ridge = roofRidgeXFromLeftAngle(66, 0.5, 2);
+    expect(clampRoofRidgeX(66, 0.5, ridge)).toBeCloseTo(ridge, 4);
+    expect(roofAnglesFromRidge(66, 0.5, ridge).leftAngle).toBeCloseTo(2, 2);
+    expect(Math.abs(ridge)).toBeGreaterThan(1);
+  });
+
   it("still admits a genuinely asymmetric ridge", () => {
     const ridge = roofRidgeXFromLeftAngle(40, 20, 60);
     expect(clampRoofRidgeX(40, 20, ridge)).toBeCloseTo(ridge, 6);
@@ -30,8 +37,8 @@ describe("roof ridge clamping", () => {
     const clamped = clampRoofRidgeX(20, 20, 5000);
     // The old bound allowed a ridge far past the point where the right angle collapsed.
     const angles = roofAnglesFromRidge(20, 20, clamped);
-    expect(angles.rightAngle).toBeGreaterThan(0.9);
-    expect(angles.leftAngle).toBeGreaterThan(0.9);
+    expect(angles.rightAngle).toBeGreaterThan(0.05);
+    expect(angles.leftAngle).toBeGreaterThan(0.05);
   });
 
   it("clamps symmetrically on both sides", () => {

@@ -65,16 +65,20 @@ export function hasUsableCsgResultMesh(shape: WorkplaneShape): boolean {
 }
 
 /**
- * Children the viewport may draw for a group. Cutters stay in the feature tree
- * for Ungroup / inspect, but they must never appear in the scene after Group.
+ * Children the viewport may draw for a group.
+ * A group of only holes stays visible so those cutters can still be edited.
+ * Once they are grouped with a solid, the cut result is the mesh and the holes leave the scene.
  */
 export function viewportGroupChildren(shape: WorkplaneShape): WorkplaneShape[] {
   if (hasUsableImportedMesh(shape)) return [];
-  return (shape.groupedShapes ?? []).filter((child) => (
+  const children = shape.groupedShapes ?? [];
+  const op = shape.csg?.op ?? inferCsgOp(shape);
+  const holeAssembly = Boolean(shape.hole) || (op === "assemble" && children.length > 0 && children.every((child) => child.hole));
+  return children.filter((child) => (
     !child.hidden
     && !child.suppressed
     && !child.csg?.suppressed
-    && !child.hole
+    && (holeAssembly || !child.hole)
   ));
 }
 

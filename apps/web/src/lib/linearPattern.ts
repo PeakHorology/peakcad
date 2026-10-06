@@ -1,4 +1,5 @@
 import { duplicateShapeForPattern } from "@/lib/circularPattern";
+import { worldAabb } from "@/lib/shapeBounds";
 import { shapeDepth, shapeWidth } from "@/lib/workplaneShapes";
 import type { WorkplaneShape } from "@/types/sketchforge";
 
@@ -74,15 +75,29 @@ export function resolveLinearPatternSourceId(
   return null;
 }
 
+function footprintExtent(shape: WorkplaneShape, axis: "x" | "z" | "y") {
+  const box = worldAabb(shape);
+  if (axis === "x") return box.max[0] - box.min[0];
+  if (axis === "z") return box.max[2] - box.min[2];
+  return box.max[1] - box.min[1];
+}
+
 export function linearPatternSuggestedSpacing(
-  sources: readonly Pick<WorkplaneShape, "width" | "depth" | "size" | "height">[],
+  sources: readonly WorkplaneShape[],
   axis: "x" | "z" | "y",
 ) {
   if (sources.length === 0) return 20;
   const gap = 2;
-  if (axis === "x") return clampLinearPatternSpacing(Math.max(...sources.map((shape) => shapeWidth(shape))) + gap);
-  if (axis === "z") return clampLinearPatternSpacing(Math.max(...sources.map((shape) => shapeDepth(shape))) + gap);
-  return clampLinearPatternSpacing(Math.max(...sources.map((shape) => shape.height)) + gap);
+  // Use the world footprint, not the unrotated width. A turned part is wider
+  // on screen than shape.width, and spacing from the local size overlaps the
+  // copies so they look crushed.
+  const span = Math.max(...sources.map((shape) => footprintExtent(shape, axis)));
+  if (!Number.isFinite(span) || span <= 0) {
+    if (axis === "x") return clampLinearPatternSpacing(Math.max(...sources.map((shape) => shapeWidth(shape))) + gap);
+    if (axis === "z") return clampLinearPatternSpacing(Math.max(...sources.map((shape) => shapeDepth(shape))) + gap);
+    return clampLinearPatternSpacing(Math.max(...sources.map((shape) => shape.height)) + gap);
+  }
+  return clampLinearPatternSpacing(span + gap);
 }
 
 export function linearPatternInstanceCount(counts: LinearPatternCounts) {

@@ -198,6 +198,15 @@ export function rulerEdgeNearSurfaceHit(hit: Vec3, edgePoint: Vec3, worldPerPixe
 }
 
 /**
+ * The pointer ray already grazes this edge. Keep it when the edge is on or in
+ * front of the first solid. An edge farther down the ray is a back face.
+ */
+export function rulerEdgeIsInFrontOfSurface(edgeRayT: number, surfaceDistance: number, worldPerPixel: number) {
+  const slack = Math.max(0.75, worldPerPixel * 4);
+  return edgeRayT <= surfaceDistance + slack;
+}
+
+/**
  * Nearest hit on a finite cylinder (side wall and caps). Used when a faceted
  * mesh raycast misses a silhouette the user is clearly pointing at.
  */

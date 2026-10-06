@@ -49,7 +49,7 @@ export function importTriangleSoup(
   const seated = seatTriangleSoupOnLargestFlatSurface(
     rawPositions,
     rawNormals,
-    sourceFormat === "stl" ? seatMode : "lay-flat",
+    seatMode === "keep-orientation" || sourceFormat === "stl" ? seatMode : "lay-flat",
   );
 
   const geometry = new THREE.BufferGeometry();

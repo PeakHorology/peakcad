@@ -35,6 +35,7 @@ import {
   buildPeakcadDocument,
   peakcadBasename,
   peakcadFilename,
+  parsePeakcadDocument,
   peakcadNamesMatch,
   serializePeakcadDocument,
   type PeakcadDocument,
@@ -42,9 +43,9 @@ import {
 } from "@/lib/peakcadDocument";
 import {
   hasDesktopProjectFiles,
-  openPeakcadFile,
-  readPeakcadPath,
-  resolveDesktopPeakcadByName,
+  openPeakcadFileText,
+  readPeakcadPathText,
+  resolveDesktopPeakcadTextByName,
   revealPeakcadFile,
   savePeakcadTextAs,
   subscribePeakcadMenu,
@@ -62,6 +63,7 @@ import {
   verifyFolderPassword,
   type FolderPasswordLock,
 } from "@/lib/folderLock";
+import { decryptPeakcadText, encryptPeakcadText, isEncryptedPeakcadText } from "@/lib/peakcadFileLock";
 import { deleteStoredProject, loadStoredProject, saveStoredProject, serializeStoredProject } from "@/lib/projectStoreClient";
 
 type AppView = "dashboard" | "editor";
@@ -809,6 +811,15 @@ export default function Home() {
   const [projects, setProjects] = useState<DashboardProject[]>([]);
   const [folders, setFolders] = useState<DashboardFolder[]>([]);
   const [unlockedFolderIds, setUnlockedFolderIds] = useState<string[]>([]);
+  const [filePasswordPrompt, setFilePasswordPrompt] = useState<{
+    title: string;
+    message: string;
+    value: string;
+    error: string;
+    busy: boolean;
+    accept: (password: string) => Promise<boolean>;
+    resolve: (password: string | null) => void;
+  } | null>(null);
   const [folderAccessRequest, setFolderAccessRequest] = useState<FolderAccessRequest | null>(null);
   const [query, setQuery] = useState("");
   const [viewMode, setViewMode] = useState<ViewMode>("grid");
@@ -826,6 +837,8 @@ export default function Home() {
   const projectsRef = useRef<DashboardProject[]>([]);
   const foldersRef = useRef<DashboardFolder[]>([]);
   const unlockedFolderIdsRef = useRef<Set<string>>(new Set());
+  const folderSecretsRef = useRef(new Map<string, string>());
+  const projectSecretsRef = useRef(new Map<string, string>());
   const projectShapesByIdRef = useRef<Record<string, ProjectShapeCacheEntry>>({});
   const projectFolderMapRef = useRef<Record<string, string | null>>({});
   const lastDiskRevisionRef = useRef<Record<string, number>>({});
@@ -864,12 +877,110 @@ export default function Home() {
     setUnlockedFolderIds([...next]);
   }, []);
 
-  const setFolderPasswordLock = useCallback((folderId: string, passwordLock: FolderPasswordLock | null) => {
+  const askFilePassword = useCallback((
+    title: string,
+    message: string,
+    accept: (password: string) => Promise<boolean>,
+  ) => {
+    return new Promise<string | null>((resolve) => {
+      setFilePasswordPrompt({ title, message, value: "", error: "", busy: false, accept, resolve });
+    });
+  }, []);
+
+  const sealPeakcadText = useCallback(async (project: DashboardProject, plain: string, prompt: boolean) => {
+    const folder = project.folderId ? foldersRef.current.find((item) => item.id === project.folderId) : undefined;
+    let password = project.folderId ? folderSecretsRef.current.get(project.folderId) ?? null : null;
+    if (!password && folder?.passwordLock) {
+      if (!prompt) return null;
+      const entered = await askFilePassword(
+        "Password required",
+        `Enter the password for ${folder.name} so this file stays protected.`,
+        (candidate) => verifyFolderPassword(candidate, folder.passwordLock as FolderPasswordLock),
+      );
+      if (!entered) throw new Error("Save cancelled.");
+      folderSecretsRef.current.set(folder.id, entered);
+      password = entered;
+    }
+    if (!password) password = projectSecretsRef.current.get(project.id) ?? null;
+    if (!password) return plain;
+    return encryptPeakcadText(plain, password);
+  }, [askFilePassword]);
+
+  const rewriteProjectDiskFile = useCallback(async (
+    project: DashboardProject,
+    nextPassword: string | null,
+    previousPassword: string | null,
+  ) => {
+    if (!project.filePath || !hasDesktopProjectFiles()) return;
+    const cached = projectShapesByIdRef.current[project.id];
+    let plain: string | null = null;
+    if (cached) {
+      plain = await serializeProjectForDisk(project, cached);
+    } else {
+      const existing = await readPeakcadPathText(project.filePath).catch(() => null);
+      if (!existing) return;
+      plain = isEncryptedPeakcadText(existing.text)
+        ? (previousPassword ? await decryptPeakcadText(existing.text, previousPassword) : null)
+        : existing.text;
+    }
+    if (!plain) return;
+    const text = nextPassword ? await encryptPeakcadText(plain, nextPassword) : plain;
+    await writePeakcadText(project.filePath, text);
+    if (nextPassword) projectSecretsRef.current.set(project.id, nextPassword);
+    else projectSecretsRef.current.delete(project.id);
+  }, []);
+
+  const rewriteFolderProjectFiles = useCallback((folderId: string, nextPassword: string | null, previousPassword: string | null) => {
+    const targets = projectsRef.current.filter((project) => project.folderId === folderId && project.filePath);
+    if (targets.length === 0) return;
+    void Promise.all(targets.map((project) => rewriteProjectDiskFile(project, nextPassword, previousPassword))).catch((error) => {
+      setDashboardNotice(error instanceof Error ? error.message : "Could not protect the saved PeakCAD files.");
+    });
+  }, [rewriteProjectDiskFile]);
+
+  const setFolderPasswordLock = useCallback((
+    folderId: string,
+    passwordLock: FolderPasswordLock | null,
+    secrets?: { next: string | null; previous: string | null },
+  ) => {
     setFolders((current) =>
       current.map((folder) => (folder.id === folderId ? { ...folder, passwordLock, updatedAt: Date.now() } : folder)),
     );
+    if (secrets?.next) folderSecretsRef.current.set(folderId, secrets.next);
+    else if (secrets) folderSecretsRef.current.delete(folderId);
     if (!passwordLock) lockFolderSession(folderId);
-  }, [lockFolderSession]);
+    if (secrets) rewriteFolderProjectFiles(folderId, secrets.next, secrets.previous);
+  }, [lockFolderSession, rewriteFolderProjectFiles]);
+
+  const rememberFolderPassword = useCallback((folderId: string, password: string) => {
+    folderSecretsRef.current.set(folderId, password);
+    rewriteFolderProjectFiles(folderId, password, password);
+  }, [rewriteFolderProjectFiles]);
+
+  const openProtectedPeakcad = useCallback(async (text: string, path: string | null) => {
+    let plain = text;
+    if (isEncryptedPeakcadText(text)) {
+      let unlocked: string | null = null;
+      const password = await askFilePassword(
+        "Password required",
+        "This PeakCAD file is password protected.",
+        async (candidate) => {
+          try {
+            unlocked = await decryptPeakcadText(text, candidate);
+            return true;
+          } catch {
+            return false;
+          }
+        },
+      );
+      if (!password || unlocked == null) return null;
+      plain = unlocked;
+      const document = parsePeakcadDocument(plain);
+      projectSecretsRef.current.set(document.project.id, password);
+      return { document, path };
+    }
+    return { document: parsePeakcadDocument(plain), path };
+  }, [askFilePassword]);
 
   const projectNeedsFolderPassword = (projectId: string) => {
     const project = projectsRef.current.find((item) => item.id === projectId) ?? readProjects().find((item) => item.id === projectId);
@@ -1418,13 +1529,15 @@ export default function Home() {
 
   const openFromDisk = useCallback(async () => {
     try {
-      const opened = await openPeakcadFile();
+      const opened = await openPeakcadFileText();
       if (!opened) return;
-      applyOpenedDocument(opened, true);
+      const document = await openProtectedPeakcad(opened.text, opened.path);
+      if (!document) return;
+      applyOpenedDocument(document, true);
     } catch (error) {
       setDashboardNotice(error instanceof Error ? error.message : "Could not open that PeakCAD file.");
     }
-  }, [applyOpenedDocument]);
+  }, [applyOpenedDocument, openProtectedPeakcad]);
 
   const saveProjectToDisk = useCallback(async (
     projectId: string,
@@ -1439,7 +1552,9 @@ export default function Home() {
       projectShapesByIdRef.current[projectId] ??
       projectShapeCacheEntry(project.revision ?? project.updatedAt, []);
     try {
-      const text = await serializeProjectForDisk(project, cached);
+      const plain = await serializeProjectForDisk(project, cached);
+      const text = await sealPeakcadText(project, plain, true);
+      if (!text) return false;
       if (!forceSaveAs && project.filePath && hasDesktopProjectFiles()) {
         await writePeakcadText(project.filePath, text);
         lastDiskRevisionRef.current[projectId] = cached.revision;
@@ -1469,7 +1584,7 @@ export default function Home() {
       setDashboardNotice(error instanceof Error ? error.message : "Could not save the PeakCAD file.");
       return false;
     }
-  }, []);
+  }, [sealPeakcadText]);
 
   const persistCachedProjectFile = useCallback((projectId: string, filePath: string) => {
     if (!hasDesktopProjectFiles()) return;
@@ -1478,11 +1593,15 @@ export default function Home() {
     if (!latest || !cached) return;
     lastDiskRevisionRef.current[projectId] = cached.revision;
     void serializeProjectForDisk({ ...latest, filePath }, cached)
-      .then((text) => writePeakcadText(filePath, text))
+      .then((plain) => sealPeakcadText({ ...latest, filePath }, plain, false))
+      .then((text) => {
+        if (!text) return;
+        return writePeakcadText(filePath, text);
+      })
       .catch((error) => {
         setDashboardNotice(error instanceof Error ? error.message : "Could not save the PeakCAD file.");
       });
-  }, []);
+  }, [sealPeakcadText]);
 
   useEffect(() => {
     if (!hasDesktopProjectFiles()) return;
@@ -1499,8 +1618,18 @@ export default function Home() {
     const project = projectsRef.current.find((item) => item.id === projectId);
     if (!project || project.filePath || projectMatchesSavedFile(project)) return;
     try {
-      const opened = await resolveDesktopPeakcadByName(project.name);
-      if (!opened?.path || opened.document.project.id !== project.id) return;
+      const opened = await resolveDesktopPeakcadTextByName(project.name);
+      if (!opened?.path) return;
+      let plain = opened.text;
+      if (isEncryptedPeakcadText(plain)) {
+        const password = (project.folderId ? folderSecretsRef.current.get(project.folderId) : undefined)
+          ?? projectSecretsRef.current.get(project.id)
+          ?? null;
+        if (!password) return;
+        plain = await decryptPeakcadText(plain, password);
+      }
+      const document = parsePeakcadDocument(plain);
+      if (document.project.id !== project.id) return;
       setProjects((current) =>
         current.map((item) => (item.id === projectId ? withSavedPeakcadFile(item, opened.path) : item)),
       );
@@ -1636,8 +1765,10 @@ export default function Home() {
       const project = projectsRef.current.find((item) => item.id === snapshot.projectId);
       if (project?.filePath && hasDesktopProjectFiles()) {
         const meta = peakcadProjectMeta({ ...project, updatedAt: revision, revision }, snapshot.shapes.length);
-        const text = await serializeStoredProject(snapshot.projectId, meta).catch(() => null)
+        const plain = await serializeStoredProject(snapshot.projectId, meta).catch(() => null)
           ?? serializePeakcadDocument(buildDocumentForProject({ ...project, updatedAt: revision, revision }, entry));
+        const text = await sealPeakcadText({ ...project, updatedAt: revision, revision }, plain, false);
+        if (!text) return;
         await writePeakcadText(project.filePath, text);
         lastDiskRevisionRef.current[snapshot.projectId] = revision;
       }
@@ -1664,7 +1795,7 @@ export default function Home() {
           delete projectShapeSaveQueuesRef.current[snapshot.projectId];
         }
       });
-  }, []);
+  }, [sealPeakcadText]);
 
   const updateProjectWorkspace = useCallback((snapshot: { projectId: string; workspace: WorkplaneWorkspaceSettings; snap: GridSize }) => {
     // Same reason as updateProjectShapes: a settings change made just before leaving the editor
@@ -1913,6 +2044,16 @@ export default function Home() {
         return folder;
       }),
     );
+    const moved = projectsRef.current.find((entry) => entry.id === projectId);
+    if (moved?.filePath) {
+      if (folderId) {
+        const secret = folderSecretsRef.current.get(folderId);
+        if (secret) void rewriteProjectDiskFile(moved, secret, secret);
+      } else if (previousFolderId) {
+        const secret = folderSecretsRef.current.get(previousFolderId);
+        if (secret) void rewriteProjectDiskFile(moved, null, secret);
+      }
+    }
   };
 
   const setFolderHero = (folderId: string, projectId: string) => {
@@ -1930,13 +2071,16 @@ export default function Home() {
       void (async () => {
         if (!(await confirmLeaveEditor())) return;
         try {
-          applyOpenedDocument(await readPeakcadPath(filePath), true);
+          const opened = await readPeakcadPathText(filePath);
+          const document = await openProtectedPeakcad(opened.text, opened.path);
+          if (!document) return;
+          applyOpenedDocument(document, true);
         } catch (error) {
           setDashboardNotice(error instanceof Error ? error.message : "Could not open that PeakCAD file.");
         }
       })();
     });
-  }, [applyOpenedDocument, confirmLeaveEditor]);
+  }, [applyOpenedDocument, confirmLeaveEditor, openProtectedPeakcad]);
 
   useEffect(() => {
     return subscribePeakcadMenu((action) => {
@@ -2070,6 +2214,7 @@ export default function Home() {
           onUnlockFolderSession={unlockFolderSession}
           onLockFolderSession={lockFolderSession}
           onSetFolderPassword={setFolderPasswordLock}
+          onRememberFolderPassword={rememberFolderPassword}
           onApplyOpenedDocument={(opened) => applyOpenedDocument(opened, true)}
           onFolderAccessRequestHandled={() => setFolderAccessRequest(null)}
         />
@@ -2141,6 +2286,79 @@ export default function Home() {
           ) : null}
         </div>
       ) : null}
+      {filePasswordPrompt ? (
+        <section className="dashboard-confirm-overlay" role="dialog" aria-modal="true" aria-labelledby="file-password-title">
+          <form
+            className="dashboard-confirm-dialog dashboard-rename-dialog"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!filePasswordPrompt || filePasswordPrompt.busy) return;
+              const password = filePasswordPrompt.value;
+              if (!password.trim()) {
+                setFilePasswordPrompt({ ...filePasswordPrompt, error: "Enter a password." });
+                return;
+              }
+              setFilePasswordPrompt({ ...filePasswordPrompt, busy: true, error: "" });
+              void filePasswordPrompt.accept(password).then((ok) => {
+                if (!ok) {
+                  setFilePasswordPrompt((current) => (current ? { ...current, busy: false, error: "Wrong password." } : current));
+                  return;
+                }
+                filePasswordPrompt.resolve(password);
+                setFilePasswordPrompt(null);
+              }).catch(() => {
+                setFilePasswordPrompt((current) => (current ? { ...current, busy: false, error: "Wrong password." } : current));
+              });
+            }}
+          >
+            <header>
+              <strong id="file-password-title">{filePasswordPrompt.title}</strong>
+              <button
+                type="button"
+                aria-label="Cancel password"
+                onClick={() => {
+                  filePasswordPrompt.resolve(null);
+                  setFilePasswordPrompt(null);
+                }}
+              >
+                <X size={18} />
+              </button>
+            </header>
+            <p>{filePasswordPrompt.message}</p>
+            <label>
+              <span>Password</span>
+              <input
+                autoFocus
+                type="password"
+                autoComplete="current-password"
+                spellCheck={false}
+                value={filePasswordPrompt.value}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setFilePasswordPrompt((current) => (current ? { ...current, value, error: "" } : current));
+                }}
+                aria-label="PeakCAD file password"
+              />
+            </label>
+            {filePasswordPrompt.error ? <p className="dashboard-dialog-error" role="alert">{filePasswordPrompt.error}</p> : null}
+            <div className="dashboard-confirm-actions">
+              <button
+                className="dashboard-confirm-cancel"
+                type="button"
+                onClick={() => {
+                  filePasswordPrompt.resolve(null);
+                  setFilePasswordPrompt(null);
+                }}
+              >
+                Cancel
+              </button>
+              <button className="dashboard-confirm-delete" type="submit" disabled={filePasswordPrompt.busy}>
+                {filePasswordPrompt.busy ? "Checking…" : "Continue"}
+              </button>
+            </div>
+          </form>
+        </section>
+      ) : null}
     </>
   );
 }
@@ -2184,6 +2402,7 @@ function Dashboard({
   onUnlockFolderSession,
   onLockFolderSession,
   onSetFolderPassword,
+  onRememberFolderPassword,
   onApplyOpenedDocument,
   onFolderAccessRequestHandled,
 }: {
@@ -2224,7 +2443,12 @@ function Dashboard({
   folderAccessRequest: FolderAccessRequest | null;
   onUnlockFolderSession: (folderId: string) => void;
   onLockFolderSession: (folderId: string) => void;
-  onSetFolderPassword: (folderId: string, passwordLock: FolderPasswordLock | null) => void;
+  onSetFolderPassword: (
+    folderId: string,
+    passwordLock: FolderPasswordLock | null,
+    secrets?: { next: string | null; previous: string | null },
+  ) => void;
+  onRememberFolderPassword: (folderId: string, password: string) => void;
   onApplyOpenedDocument: (opened: NonNullable<FolderAccessRequest["opened"]>) => void;
   onFolderAccessRequestHandled: () => void;
 }) {
@@ -2424,9 +2648,10 @@ function Dashboard({
     clearLockFields();
   };
 
-  const finishUnlock = (folderId: string, dialog: LockDialogState) => {
+  const finishUnlock = (folderId: string, dialog: LockDialogState, password?: string) => {
     sessionUnlockedRef.current.add(folderId);
     onUnlockFolderSession(folderId);
+    if (password?.trim()) onRememberFolderPassword(folderId, password);
     setLockDialog(null);
     clearLockFields();
     onFolderAccessRequestHandled();
@@ -2461,7 +2686,7 @@ function Dashboard({
       setLockBusy(true);
       try {
         const lock = await hashFolderPassword(passwordDraft);
-        onSetFolderPassword(folder.id, lock);
+        onSetFolderPassword(folder.id, lock, { next: passwordDraft, previous: null });
         closeLockDialog();
       } catch {
         setLockError("Could not save that password.");
@@ -2475,7 +2700,7 @@ function Dashboard({
         return;
       }
       if (!folder.passwordLock) {
-        finishUnlock(folder.id, lockDialog);
+        finishUnlock(folder.id, lockDialog, passwordDraft);
         return;
       }
       setLockBusy(true);
@@ -2486,7 +2711,7 @@ function Dashboard({
           setLockBusy(false);
           return;
         }
-        finishUnlock(folder.id, lockDialog);
+        finishUnlock(folder.id, lockDialog, passwordDraft);
       } catch {
         setLockError("Could not check that password.");
         setLockBusy(false);
@@ -2510,7 +2735,7 @@ function Dashboard({
         return;
       }
       if (lockDialog.mode === "remove") {
-        onSetFolderPassword(folder.id, null);
+        onSetFolderPassword(folder.id, null, { next: null, previous: passwordCurrent });
         closeLockDialog();
         return;
       }
@@ -2525,7 +2750,7 @@ function Dashboard({
         return;
       }
       const lock = await hashFolderPassword(passwordDraft);
-      onSetFolderPassword(folder.id, lock);
+      onSetFolderPassword(folder.id, lock, { next: passwordDraft, previous: passwordCurrent });
       closeLockDialog();
     } catch {
       setLockError("Could not update that password.");
@@ -3669,7 +3894,7 @@ function Dashboard({
             <p>
               {lockDialog.mode === "create" ? (
                 <>
-                  Projects in <span>{folders.find((folder) => folder.id === lockDialog.folderId)?.name}</span> will only appear inside this folder. This does not encrypt the file on disk.
+                  Projects in <span>{folders.find((folder) => folder.id === lockDialog.folderId)?.name}</span> stay inside this folder. A PeakCAD file from this folder asks for the same password before it opens.
                 </>
               ) : lockDialog.mode === "unlock" ? (
                 <>

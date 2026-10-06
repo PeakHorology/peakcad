@@ -9,6 +9,7 @@ import {
   intersectRayFiniteCylinder,
   measureAlignLabelPrefix,
   radialsAreOpposite,
+  rulerEdgeIsInFrontOfSurface,
   rulerEdgeNearSurfaceHit,
   snapPointToCylinder,
   vec3,
@@ -153,6 +154,13 @@ describe("rulerEdgeNearSurfaceHit", () => {
     const hit = vec3(10, 10, 0);
     expect(rulerEdgeNearSurfaceHit(hit, vec3(10, 10, 0.4), 0.2)).toBe(true);
     expect(rulerEdgeNearSurfaceHit(hit, vec3(10, 0, 0), 0.2)).toBe(false);
+  });
+});
+
+describe("rulerEdgeIsInFrontOfSurface", () => {
+  it("keeps an edge on the near face and rejects one behind the solid", () => {
+    expect(rulerEdgeIsInFrontOfSurface(40, 40.2, 0.2)).toBe(true);
+    expect(rulerEdgeIsInFrontOfSurface(90, 40, 0.2)).toBe(false);
   });
 });
 

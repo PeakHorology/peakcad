@@ -68,6 +68,38 @@ describe("linearPatternInstances", () => {
       { id: linearPatternCopyId("src", 2, 1, 0), x: 24, z: 8 },
     ]);
     expect(instances[1].groupedShapes).toHaveLength(1);
+    expect(instances[1].width).toBe(source.width);
+    expect(instances[1].height).toBe(source.height);
+    expect(instances[1].groupedShapes?.[0].width).toBe(4);
+  });
+
+  it("keeps a mesh copy the same size as the source", () => {
+    const positions = Float32Array.from([0, 0, 0, 40, 0, 0, 40, 10, 0]);
+    const source = box({
+      id: "mesh",
+      x: 1,
+      z: 2,
+      kind: "mesh",
+      width: 40,
+      depth: 10,
+      height: 10,
+      size: 40,
+      importedMesh: {
+        positions: positions as unknown as number[],
+        baseWidth: 40,
+        baseDepth: 10,
+        baseHeight: 10,
+        triangleCount: 1,
+        sourceFormat: "json",
+      },
+    });
+    const copy = linearPatternInstances([source], { countX: 2, countZ: 1 }, { spacingX: 50, spacingZ: 12 })[1];
+    expect(copy.width).toBe(40);
+    expect(copy.depth).toBe(10);
+    expect(copy.height).toBe(10);
+    expect(copy.importedMesh?.baseWidth).toBe(40);
+    expect(copy.importedMesh?.positions.length).toBe(9);
+    expect(Array.isArray(copy.importedMesh?.positions)).toBe(true);
   });
 
   it("offsets copies in the negative Width direction", () => {
@@ -90,6 +122,12 @@ describe("linearPatternInstances", () => {
 describe("linearPatternSuggestedSpacing", () => {
   it("uses the source size plus a small gap", () => {
     expect(linearPatternSuggestedSpacing([box({ id: "a", x: 0, z: 0, width: 16 })], "x")).toBe(18);
+  });
+
+  it("spaces a turned square by its world footprint, not the unrotated side", () => {
+    const turned = box({ id: "a", x: 0, z: 0, width: 20, depth: 20, size: 20, rotation: 45 });
+    const spacing = linearPatternSuggestedSpacing([turned], "x");
+    expect(spacing).toBeGreaterThan(22);
   });
 });
 

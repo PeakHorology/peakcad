@@ -2,6 +2,7 @@ import * as THREE from "three";
 import { hasOneToOneCadComponentMapping } from "@/lib/cadModifierGroups";
 import { cloneWorkplaneShapeSnapshot, compactEdgeTreatmentHistory, edgeTreatmentAppliedFrame, restoreShapeBeforeEdgeTreatment } from "@/lib/edgeTreatmentHistory";
 import { cloneAsGroupChild } from "@/lib/editorGroup";
+import { restoreGroupedChildren } from "@/lib/editorBoolean";
 import { createLocalId } from "@/lib/localIds";
 import { canonicalizeShape, cleanNearZero, shapeDepth, shapeWidth } from "@/lib/workplaneShapes";
 import type { CadModifierComponentMesh, CadModifierDisplayEdge, CadModifierEdge } from "@/lib/cadModifierTypes";
@@ -10,6 +11,8 @@ import type { EdgeFeatureRevertOption, EdgeModifierComponentPreview, EdgeModifie
 import { MIN_SHAPE_DIMENSION, cleanModelDimension } from "@/lib/modelDimension";
 
 const NORMAL_SELECTION_CAD_EDGE_MIN_ANGLE = 60;
+/** One click must not fillet a whole tessellated loop. Shift-click still picks a single edge. */
+const MAX_TANGENT_FILLET_CHAIN = 24;
 
 export function cadEdgeEndpoint(edge: CadModifierEdge, end: "start" | "end") {
   const offset = end === "start" ? 0 : edge.points.length - 3;
@@ -54,16 +57,18 @@ export function tangentCadEdgeChain(edges: CadModifierEdge[], startId: number, a
     : 1;
   const tolerance = Math.max(1e-6, Math.min(0.01, diagonal * 1e-5));
   while (cursor < queue.length) {
+    if (selected.size > MAX_TANGENT_FILLET_CHAIN) return [startId];
     const id = queue[cursor];
     cursor += 1;
     const edge = edgeById.get(id);
     if (!edge) continue;
     const endpoints = [cadEdgeEndpoint(edge, "start"), cadEdgeEndpoint(edge, "end")];
-    edges.forEach((candidate) => {
-      if (selected.has(candidate.id) || !allowedIds.has(candidate.id)) return;
+    for (const candidate of edges) {
+      if (selected.size > MAX_TANGENT_FILLET_CHAIN) return [startId];
+      if (selected.has(candidate.id) || !allowedIds.has(candidate.id)) continue;
       const candidateEndpoints = [cadEdgeEndpoint(candidate, "start"), cadEdgeEndpoint(candidate, "end")];
       const shared = endpoints.find((point) => candidateEndpoints.some((other) => point.distanceTo(other) <= tolerance));
-      if (!shared) return;
+      if (!shared) continue;
       const a = cadEdgeTangentAt(edge, shared);
       const b = cadEdgeTangentAt(candidate, shared);
       const deviation = (Math.acos(Math.max(-1, Math.min(1, Math.abs(a.dot(b))))) * 180) / Math.PI;
@@ -71,7 +76,7 @@ export function tangentCadEdgeChain(edges: CadModifierEdge[], startId: number, a
         selected.add(candidate.id);
         queue.push(candidate.id);
       }
-    });
+    }
   }
   return [...selected];
 }
@@ -169,12 +174,16 @@ export function shapeWithEdgeTreatmentRecord(
 
 export function bakedEdgeTreatmentPreview(shape: WorkplaneShape, base: WorkplaneShape) {
   if (!base.groupedShapes?.length) return shape;
+  // The fillet mesh is what the group shows. The original pieces stay attached,
+  // moved into the mesh frame, so Ungroup still opens them where they were.
+  const worldChildren = restoreGroupedChildren(base, { preserveIds: true });
+  const minY = shape.elevation ?? 0;
   return canonicalizeShape({
     ...shape,
-    groupedShapes: undefined,
-    groupedBaseWidth: undefined,
-    groupedBaseDepth: undefined,
-    groupedBaseHeight: undefined,
+    groupedShapes: worldChildren.map((child) => cloneAsGroupChild(child, shape.x, shape.z, minY, true)),
+    groupedBaseWidth: shapeWidth(shape),
+    groupedBaseDepth: shapeDepth(shape),
+    groupedBaseHeight: shape.height,
   });
 }
 

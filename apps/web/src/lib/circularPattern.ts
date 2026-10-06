@@ -116,10 +116,47 @@ export function circularPatternWouldClamp(
   return false;
 }
 
-/** Deep-clone a shape for pattern copies (includes nested groups / meshes). */
+function copyBuffer(values: ArrayLike<number> | undefined) {
+  return values ? Array.from(values) : undefined;
+}
+
+/**
+ * Deep-clone a shape for pattern copies.
+ * Dimensions and mesh buffers stay equal to the source. A JSON snapshot can turn
+ * typed arrays into plain objects (no length), and the viewport then draws a
+ * tiny stand-in instead of the real body.
+ */
 export function duplicateShapeForPattern(shape: WorkplaneShape, id: string): WorkplaneShape {
   const clone = cloneWorkplaneShapeSnapshot(shape);
-  return { ...clone, id };
+  const mesh = shape.importedMesh;
+  if (mesh && typeof mesh.positions?.length === "number" && mesh.positions.length >= 9) {
+    clone.importedMesh = {
+      ...mesh,
+      positions: Array.from(mesh.positions),
+      normals: copyBuffer(mesh.normals),
+      indices: copyBuffer(mesh.indices),
+    };
+  }
+  if (shape.groupedShapes?.length) {
+    clone.groupedShapes = shape.groupedShapes.map((child, index) => {
+      const clonedChild = clone.groupedShapes?.[index];
+      return duplicateShapeForPattern(child, clonedChild?.id ?? child.id);
+    });
+  }
+  return {
+    ...clone,
+    id,
+    width: shape.width,
+    depth: shape.depth,
+    height: shape.height,
+    size: shape.size,
+    radius: shape.radius,
+    topRadius: shape.topRadius,
+    baseRadius: shape.baseRadius,
+    groupedBaseWidth: shape.groupedBaseWidth,
+    groupedBaseDepth: shape.groupedBaseDepth,
+    groupedBaseHeight: shape.groupedBaseHeight,
+  };
 }
 
 function placeInstance(

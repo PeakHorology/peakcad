@@ -1,3 +1,4 @@
+import * as THREE from "three";
 import type { WorkplaneShape } from "@/types/sketchforge";
 import { shapeDepth, shapeWidth } from "@/lib/workplaneShapes";
 
@@ -31,21 +32,51 @@ export function shapeYawDegrees(shape: WorkplaneShape): number {
 
 export type Aabb = { min: [number, number, number]; max: [number, number, number] };
 
+/**
+ * Axis-aligned bounds of the width × height × depth box the viewport draws.
+ * A stretched cylinder, sphere, cone, or polygon uses this same box as a rectangle,
+ * including yaw once the footprint is no longer circular.
+ */
 export function worldAabb(shape: WorkplaneShape): Aabb {
-  const w = shapeWidth(shape);
-  const d = shapeDepth(shape);
-  const h = shape.height;
-  const cx = shape.x;
-  const cy = (shape.elevation ?? 0) + h / 2;
-  const cz = shape.z;
-  const rotated = (shape.rotationX ?? 0) !== 0 || (shape.rotationZ ?? 0) !== 0 || shapeYawDegrees(shape) !== 0;
-  const [hx, hy, hz] = rotated
-    ? (() => {
-        const r = 0.5 * Math.sqrt(w * w + h * h + d * d);
-        return [r, r, r];
-      })()
-    : [w / 2, h / 2, d / 2];
-  return { min: [cx - hx, cy - hy, cz - hz], max: [cx + hx, cy + hy, cz + hz] };
+  const hx = shapeWidth(shape) / 2;
+  const hy = shape.height / 2;
+  const hz = shapeDepth(shape) / 2;
+  const center = new THREE.Vector3(shape.x, (shape.elevation ?? 0) + hy, shape.z);
+  const yaw = shapeYawDegrees(shape);
+  const tiltX = shape.rotationX ?? 0;
+  const tiltZ = shape.rotationZ ?? 0;
+  if (yaw === 0 && tiltX === 0 && tiltZ === 0) {
+    return {
+      min: [center.x - hx, center.y - hy, center.z - hz],
+      max: [center.x + hx, center.y + hy, center.z + hz],
+    };
+  }
+  const quaternion = new THREE.Quaternion().setFromEuler(new THREE.Euler(
+    THREE.MathUtils.degToRad(tiltX),
+    THREE.MathUtils.degToRad(yaw),
+    THREE.MathUtils.degToRad(tiltZ),
+    "XYZ",
+  ));
+  let minX = Infinity;
+  let minY = Infinity;
+  let minZ = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  let maxZ = -Infinity;
+  for (const sx of [-1, 1]) {
+    for (const sy of [-1, 1]) {
+      for (const sz of [-1, 1]) {
+        const point = new THREE.Vector3(sx * hx, sy * hy, sz * hz).applyQuaternion(quaternion).add(center);
+        if (point.x < minX) minX = point.x;
+        if (point.y < minY) minY = point.y;
+        if (point.z < minZ) minZ = point.z;
+        if (point.x > maxX) maxX = point.x;
+        if (point.y > maxY) maxY = point.y;
+        if (point.z > maxZ) maxZ = point.z;
+      }
+    }
+  }
+  return { min: [minX, minY, minZ], max: [maxX, maxY, maxZ] };
 }
 
 export function aabbsOverlap(a: Aabb, b: Aabb): boolean {

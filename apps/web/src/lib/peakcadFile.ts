@@ -49,25 +49,35 @@ function pickBrowserFile() {
   });
 }
 
-export async function openPeakcadFile(): Promise<OpenedPeakcadFile | null> {
+export async function openPeakcadFileText(): Promise<{ text: string; path: string | null } | null> {
   const desktop = fileApi();
   if (desktop?.open) {
     const result = await desktop.open();
     if (!result) return null;
-    return { document: parsePeakcadDocument(result.text), path: result.path };
+    return { text: result.text, path: result.path };
   }
   const file = await pickBrowserFile();
   if (!file) return null;
-  const text = await file.text();
-  return { document: parsePeakcadDocument(text), path: null };
+  return { text: await file.text(), path: null };
 }
 
-export async function readPeakcadPath(filePath: string): Promise<OpenedPeakcadFile> {
+export async function openPeakcadFile(): Promise<OpenedPeakcadFile | null> {
+  const opened = await openPeakcadFileText();
+  if (!opened) return null;
+  return { document: parsePeakcadDocument(opened.text), path: opened.path };
+}
+
+export async function readPeakcadPathText(filePath: string): Promise<{ text: string; path: string }> {
   const desktop = fileApi();
   if (!desktop?.read) {
     throw new Error("Opening a file path is only available in the PeakCAD desktop app.");
   }
   const result = await desktop.read(filePath);
+  return { text: result.text, path: result.path };
+}
+
+export async function readPeakcadPath(filePath: string): Promise<OpenedPeakcadFile> {
+  const result = await readPeakcadPathText(filePath);
   return { document: parsePeakcadDocument(result.text), path: result.path };
 }
 
@@ -99,10 +109,16 @@ export async function savePeakcadTextAs(text: string, suggestedName: string): Pr
   return null;
 }
 
-export async function resolveDesktopPeakcadByName(suggestedName: string): Promise<OpenedPeakcadFile | null> {
+export async function resolveDesktopPeakcadTextByName(suggestedName: string): Promise<{ path: string; text: string } | null> {
   const desktop = fileApi();
   if (!desktop?.resolveName) return null;
   const result = await desktop.resolveName(peakcadFilename(suggestedName));
+  if (!result) return null;
+  return { path: result.path, text: result.text };
+}
+
+export async function resolveDesktopPeakcadByName(suggestedName: string): Promise<OpenedPeakcadFile | null> {
+  const result = await resolveDesktopPeakcadTextByName(suggestedName);
   if (!result) return null;
   return { document: parsePeakcadDocument(result.text), path: result.path };
 }

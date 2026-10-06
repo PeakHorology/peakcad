@@ -1,6 +1,7 @@
 import * as THREE from "three";
 import { ThreeMFLoader } from "three/examples/jsm/loaders/3MFLoader.js";
 import { strFromU8, unzipSync } from "fflate";
+import { importedShapeFrom3mfPackage } from "@/lib/threeMfPackage";
 import { importedShapeFromTriangleSoup } from "@/lib/stlImport";
 import type { WorkplaneShape } from "@/types/sketchforge";
 
@@ -100,6 +101,8 @@ function collectTriangleSoup(root: THREE.Object3D) {
 }
 
 export function importedShapeFrom3mf(fileName: string, buffer: ArrayBuffer): WorkplaneShape {
+  const preserved = importedShapeFrom3mfPackage(fileName, buffer);
+  if (preserved) return preserved;
   const group = threeMfLoader.parse(buffer);
   const soup = collectTriangleSoup(group);
   if (soup.positions.length < 9) {

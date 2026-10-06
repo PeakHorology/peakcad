@@ -188,6 +188,9 @@ export function parsePeakcadDocument(raw: string): PeakcadDocument {
   if (record.format !== PEAKCAD_FORMAT) {
     throw new Error("This file is not a PeakCAD project.");
   }
+  if (typeof record.lock === "string") {
+    throw new Error("This PeakCAD file is password protected.");
+  }
   const version = asFiniteNumber(record.version, 0);
   if (version < 1) {
     throw new Error("This PeakCAD file is too old to open.");

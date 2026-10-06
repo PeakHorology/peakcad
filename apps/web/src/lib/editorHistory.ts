@@ -1,5 +1,6 @@
 import type { WorkplaneShape } from "@/types/sketchforge";
 import { hardwareProfile } from "@/lib/desktopHardware";
+import { lookup3mfPackage, remember3mfPackage } from "@/lib/threeMfSource";
 import { canonicalizeShape } from "@/lib/workplaneShapes";
 
 const profile = hardwareProfile();
@@ -62,6 +63,7 @@ function shapeFingerprintPayload(shape: WorkplaneShape): unknown {
     kind: shape.kind,
     color: shape.color,
     hole: shape.hole || undefined,
+    solidColor: shape.solidColor,
     x: shape.x,
     z: shape.z,
     elevation: shape.elevation ?? 0,
@@ -156,6 +158,10 @@ export function compactHistoryShape(
     compactHistoryShape(child, vault, `${path}/${child.id || index}`),
   );
   let next: WorkplaneShape = groupedShapes ? { ...shape, groupedShapes } : { ...shape };
+  if (next.source3mf) {
+    remember3mfPackage(next.source3mf);
+    next = { ...next, source3mf: undefined, source3mfKey: next.source3mf.key };
+  }
 
   if (next.edgeTreatmentHistory?.length) {
     next = {
@@ -233,13 +239,15 @@ export function expandHistoryShapes(
   shapes: WorkplaneShape[],
   vault: EditorHistoryMeshVault | undefined,
 ): WorkplaneShape[] {
-  if (!vault || !Object.keys(vault).length) return shapes;
-
   const expand = (shape: WorkplaneShape, path: string): WorkplaneShape => {
     const groupedShapes = shape.groupedShapes?.map((child, index) =>
       expand(child, `${path}/${child.id || index}`),
     );
     let next: WorkplaneShape = groupedShapes ? { ...shape, groupedShapes } : { ...shape };
+    if (!next.source3mf && next.source3mfKey) {
+      const source = lookup3mfPackage(next.source3mfKey);
+      if (source) next = { ...next, source3mf: source };
+    }
 
     if (next.edgeTreatmentHistory?.length) {
       next = {
@@ -251,7 +259,7 @@ export function expandHistoryShapes(
       };
     }
 
-    const blob = vault[meshVaultKey(path)];
+    const blob = vault?.[meshVaultKey(path)];
     if (blob && next.importedMesh) {
       next = {
         ...next,

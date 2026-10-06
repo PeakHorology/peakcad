@@ -23,7 +23,7 @@ export const TOOL_DESCRIPTIONS = {
   more: "Open extra tips and selection actions.",
   drop: "Drop the selection onto the workplane.",
   import: "Import STEP, STL, 3MF, or SVG. Optionally import as a hole.",
-  export: "Export the current model to a downloadable file.",
+  export: "Export the current model. A 3MF that was imported keeps its other settings when you export 3MF again.",
   reduceFileSize: "Shrink an imported mesh so an STL export is small enough for a laser or viewer to open. Large faces use fewer triangles; small parts and sharp edges stay so the shape still reads. Exact STEP export is unchanged.",
   saveProject: "Overwrite the .peakcad file that matches this design name.",
   saveProjectAs: "Save this design as a new .peakcad file.",

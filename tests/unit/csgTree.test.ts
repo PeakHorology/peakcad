@@ -264,6 +264,15 @@ describe("csgTree", () => {
     expect(viewportGroupChildren(body).map((child) => child.id)).toEqual(["solid"]);
   });
 
+  it("keeps a group of only holes on screen until they cut a solid", () => {
+    const holes: WorkplaneShape = {
+      ...boxChild("hole-group", true),
+      groupedShapes: [boxChild("hole-a", true), boxChild("hole-b", true)],
+      csg: { op: "assemble", version: 1 },
+    };
+    expect(viewportGroupChildren(holes).map((child) => child.id)).toEqual(["hole-a", "hole-b"]);
+  });
+
   it("draws no live children once a grouped result mesh exists", () => {
     const body: WorkplaneShape = {
       ...boxChild("cut-body"),

@@ -264,8 +264,18 @@ export function fallbackSolidColor(shape: WorkplaneShape) {
   return "#d41721";
 }
 
+const HOLE_DISPLAY_COLOR = "#b8c2cc";
+
+function rememberedSolidColor(shape: WorkplaneShape) {
+  if (shape.solidColor && shape.solidColor !== HOLE_DISPLAY_COLOR) return shape.solidColor;
+  if (shape.color && shape.color !== HOLE_DISPLAY_COLOR) return shape.color;
+  return undefined;
+}
+
 export function withHoleMode(shape: WorkplaneShape, hole: boolean, parentColor?: string): WorkplaneShape {
-  const color = hole ? "#b8c2cc" : (parentColor ?? fallbackSolidColor(shape));
+  const solidColor = rememberedSolidColor(shape);
+  const explicitColor = parentColor && parentColor !== HOLE_DISPLAY_COLOR ? parentColor : undefined;
+  const color = hole ? HOLE_DISPLAY_COLOR : (explicitColor ?? solidColor ?? fallbackSolidColor(shape));
   // Boolean cut / union groups already encode solid vs hole roles on children.
   // Recursing would flip cutter children to solid (or solids to holes) and break re-cuts.
   const isBooleanGroup =
@@ -276,13 +286,15 @@ export function withHoleMode(shape: WorkplaneShape, hole: boolean, parentColor?:
       || shape.id.startsWith("grouped-cut")
       || Boolean(shape.importedMesh)
     );
-  if (isBooleanGroup) {
-    return { ...shape, hole, color };
-  }
-  return {
+  const next: WorkplaneShape = {
     ...shape,
     hole,
     color,
+    ...(solidColor ? { solidColor } : { solidColor: undefined }),
+  };
+  if (isBooleanGroup) return next;
+  return {
+    ...next,
     groupedShapes: shape.groupedShapes?.map((child) => withHoleMode(child, hole, parentColor)),
   };
 }
